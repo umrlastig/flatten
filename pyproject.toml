@@ -1,0 +1,48 @@
+[build-system]
+requires = ["uv_build >= 0.9.26, <0.10.0"]
+build-backend = "uv_build"
+
+[project]
+name = "flatten"
+version = "0.0.1"
+authors = [
+  { name="Julien Perret", email="Julien.Perret@ign.fr" },
+]
+description = "A package to flatten geographical features"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "GPL-3.0-or-later"
+license-files = ["LICEN[CS]E*"]
+dependencies = [
+    "geopandas>=1.0.1",
+    "typer>=0.21.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/umrlastig/flatten/"
+Issues = "https://github.com/umrlastig/flatten/issues"
+
+[tool.uv.workspace]
+members = [
+    "flatten",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-cov>=7.0.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests"
+]
+
+[project.scripts]
+flatten_split = "flatten.split:app"
