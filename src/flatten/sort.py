@@ -1,13 +1,14 @@
 import networkx as nx
 from collections import defaultdict, deque
-from tqdm import tqdm   # optional progress bar for large graphs
+from tqdm import tqdm  # optional progress bar for large graphs
+
 
 def intersection_nodes(G: nx.DiGraph) -> set:
     """
     Return the set of nodes whose total degree (in + out) exceeds 2.
     """
-    return {n for n in G.nodes()
-            if (G.in_degree(n) + G.out_degree(n)) > 2}
+    return {n for n in G.nodes() if (G.in_degree(n) + G.out_degree(n)) > 2}
+
 
 def dfs_paths_limited(G, source, depth_limit=10):
     """
@@ -17,14 +18,15 @@ def dfs_paths_limited(G, source, depth_limit=10):
     stack = [(source, [source])]
     while stack:
         node, path = stack.pop()
-        if len(path) - 1 == depth_limit:   # reached limit
+        if len(path) - 1 == depth_limit:  # reached limit
             yield path
             continue
         for succ in G.successors(node):
-            if succ not in path:            # keep it simple
+            if succ not in path:  # keep it simple
                 stack.append((succ, path + [succ]))
         # also yield the current partial path
         yield path
+
 
 def shortest_path_candidates(G):
     """
@@ -34,9 +36,10 @@ def shortest_path_candidates(G):
     for u in G.nodes():
         sp = nx.single_source_shortest_path(G, u)
         for v, p in sp.items():
-            if len(p) > 1:          # ignore trivial single‑node paths
+            if len(p) > 1:  # ignore trivial single‑node paths
                 candidates.append(p)
     return candidates
+
 
 def path_score(path, intersections):
     """
@@ -46,6 +49,7 @@ def path_score(path, intersections):
     # endpoints that happen to be intersections; adjust as needed.
     interior = set(path[1:-1])
     return len(interior & intersections)
+
 
 def rank_paths(G, path_iter, intersections):
     """
@@ -59,18 +63,19 @@ def rank_paths(G, path_iter, intersections):
     scored.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
     return scored
 
+
 def flatten_ranked_paths(ranked_paths):
     """
     Produce a linear ordering of edges.
     Duplicate edges are emitted only once, at the first occurrence
     (i.e., the highest‑scoring path that contains them).
     """
-    seen = set()                 # (u, v) pairs already placed
+    seen = set()  # (u, v) pairs already placed
     ordered_edges = []
 
     for score, path in ranked_paths:
         # Convert the node list into edge tuples
-        edges = [(path[i], path[i+1]) for i in range(len(path)-1)]
+        edges = [(path[i], path[i + 1]) for i in range(len(path) - 1)]
         for e in edges:
             if e not in seen:
                 ordered_edges.append(e)
@@ -84,9 +89,8 @@ def flatten_ranked_paths(ranked_paths):
 
     return ordered_edges
 
-def sort_edges_by_max_intersections(G,
-                                    method="dfs",
-                                    depth_limit=10):
+
+def sort_edges_by_max_intersections(G, method="dfs", depth_limit=10):
     """
     Main entry point.
 
@@ -110,8 +114,9 @@ def sort_edges_by_max_intersections(G,
     # 2️⃣  Candidate paths
     if method == "dfs":
         # generate paths from every possible source node
-        path_gen = (p for src in G.nodes()
-                       for p in dfs_paths_limited(G, src, depth_limit))
+        path_gen = (
+            p for src in G.nodes() for p in dfs_paths_limited(G, src, depth_limit)
+        )
     elif method == "shortest":
         path_gen = shortest_path_candidates(G)
     else:
@@ -125,11 +130,19 @@ def sort_edges_by_max_intersections(G,
 
     return ordered_edges
 
+
 # Build a toy graph
 G = nx.DiGraph()
 edges = [
-    (1, 2), (2, 3), (3, 4), (4, 5),   # a straight chain
-    (2, 6), (6, 7), (7, 4),           # creates a junction at 4 (deg>2)
-    (5, 8), (8, 9), (9, 10)           # another branch
+    (1, 2),
+    (2, 3),
+    (3, 4),
+    (4, 5),  # a straight chain
+    (2, 6),
+    (6, 7),
+    (7, 4),  # creates a junction at 4 (deg>2)
+    (5, 8),
+    (8, 9),
+    (9, 10),  # another branch
 ]
 G.add_edges_from(edges)
