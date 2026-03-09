@@ -1,6 +1,12 @@
 import pytest
 from shapely import Polygon, LineString
-from flatten.utils import find_projection, get_bottlenecks, split_by_first_false, merge_profile_points, get_profiles
+from flatten.utils import (
+    find_projection,
+    get_bottlenecks,
+    split_by_first_false,
+    merge_profile_points,
+    get_profiles,
+)
 import geopandas as gpd
 
 
@@ -82,15 +88,26 @@ def test_split_by_first_false():
     print(res)
     assert res == ([("d", True, 4)], [("a", True, 1), ("b", True, 2), ("c", False, 3)])
 
+
 def test_merge_profile_points():
-    points: list[tuple[tuple[float, float], bool, int | None]] = [((0.,0.), True, 1), ((0.,0.), False, 2), ((0.,0.), False, 3)]
+    points: list[tuple[tuple[float, float], bool, int | None]] = [
+        ((0.0, 0.0), True, 1),
+        ((0.0, 0.0), False, 2),
+        ((0.0, 0.0), False, 3),
+    ]
     merged = merge_profile_points(points)
     print(merged)
     assert merged == [((0.0, 0.0), True, [1, 2, 3])]
-    points: list[tuple[tuple[float, float], bool, int | None]] = [((0.,0.), False, 1), ((0.,0.), False, 2), ((0.,0.), False, 3), ((0.,1.), False, 4)]
+    points: list[tuple[tuple[float, float], bool, int | None]] = [
+        ((0.0, 0.0), False, 1),
+        ((0.0, 0.0), False, 2),
+        ((0.0, 0.0), False, 3),
+        ((0.0, 1.0), False, 4),
+    ]
     merged = merge_profile_points(points)
     print(merged)
     assert merged == [((0.0, 0.0), False, [1, 2, 3]), ((0.0, 1.0), False, [4])]
+
 
 def test_get_profiles():
     s1 = LineString(((0.0, 0.0), (0.0, 2.0)))
@@ -99,15 +116,29 @@ def test_get_profiles():
     l1 = LineString(((-1.0, 1.0), (4.0, 1.0)))
     l2 = LineString(((-1.0, 0.0), (-1.0, 1.0)))
     segments = gpd.GeoDataFrame(
-        {"segment_id": [0, 1, 2], "constraint": [False, False, False], "type": ["unconstrained", "bottleneck", "unconstrained"], "n_segments": [1,1,1], "geometry": [s1, s2, s3]},
+        {
+            "segment_id": [0, 1, 2],
+            "constraint": [False, False, False],
+            "type": ["unconstrained", "bottleneck", "unconstrained"],
+            "n_segments": [1, 1, 1],
+            "geometry": [s1, s2, s3],
+        },
         geometry="geometry",
         crs="EPSG:4326",
     )
-    left, right = get_profiles(segments, l1) # type: ignore
+    left, right = get_profiles(segments, l1)  # type: ignore
     print(left)
-    assert left == [((0.0, 2.0), False, None), ((0.0, 3.0), False, 0), ((0.0, 4.0), False, None)]
+    assert left == [
+        ((0.0, 2.0), False, None),
+        ((0.0, 3.0), False, 0),
+        ((0.0, 4.0), False, None),
+    ]
     print(right)
-    assert right == [((0.0, 0.0), False, None), ((2.0, 0.0), False, 0), ((3.0, 0.0), False, None)]
+    assert right == [
+        ((0.0, 0.0), False, None),
+        ((2.0, 0.0), False, 0),
+        ((3.0, 0.0), False, None),
+    ]
 
-    profiles = get_profiles(segments, l2) # type: ignore
+    profiles = get_profiles(segments, l2)  # type: ignore
     assert profiles is None

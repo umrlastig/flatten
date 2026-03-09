@@ -227,12 +227,13 @@ def merge_profile_points(
         """
         return any([e[1] for e in list])
 
-    def build(point:tuple[float, float], list: list[tuple[tuple[float, float], bool, int | None]]):
+    def build(
+        point: tuple[float, float],
+        list: list[tuple[tuple[float, float], bool, int | None]],
+    ):
         return (point, get_shared(list), get_b(list))
 
-    return [
-        build(key, list(g)) for key, g in groupby(points, key=lambda l: l[0])
-    ]
+    return [build(key, list(g)) for key, g in groupby(points, key=lambda l: l[0])]
 
 
 def split_by_first_false(
