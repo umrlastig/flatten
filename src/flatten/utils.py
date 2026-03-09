@@ -1,4 +1,4 @@
-from itertools import groupby
+from itertools import groupby, takewhile
 from typing import Optional, Union
 import shapely
 from shapely import LinearRing, Point, LineString, Polygon
@@ -7,6 +7,16 @@ from functools import reduce
 from pyinterpolate import inverse_distance_weighting
 
 def find_projection(triangle: shapely.Polygon, segment: shapely.LineString) -> shapely.LineString | None:
+    """
+    Projects the point not on the constrained segment to its projection on the constrained segment if it exists.
+    
+    :param triangle: a triangle
+    :type triangle: shapely.Polygon
+    :param segment: a constrained segment
+    :type segment: shapely.LineString
+    :return: the linestring connecting the point not on the constrained segment to its projection.
+    :rtype: LineString | None
+    """
     triangle_coordinates: list[list[float]] = shapely.get_coordinates(triangle, include_z=False).tolist()
     segment_coordinates: list[list[float]] = shapely.get_coordinates(segment, include_z=False).tolist()
     other_coordinate = next(filter(lambda c: c not in segment_coordinates, triangle_coordinates))
@@ -14,22 +24,23 @@ def find_projection(triangle: shapely.Polygon, segment: shapely.LineString) -> s
     if (dist > 0.) and (dist < 1.):
         projection: list[float] = shapely.get_coordinates(segment.interpolate(dist, normalized=True)).tolist()[0]
         return LineString([projection, other_coordinate])
-        # proj_height = inverse_distance_weighting(
-        #     unknown_location=projection,
-        #     known_values=elevations,
-        #     known_geometries=sample_points,
-        #     power=2.
-        # )
-        # other_height = inverse_distance_weighting(
-        #     unknown_location=other_coordinate,
-        #     known_values=elevations,
-        #     known_geometries=sample_points,
-        #     power=2.
-        # )
-        # return LineString([(*projection, proj_height), (*other_coordinate, other_height)])
     return None
 
-def get_bottlenecks(gdf_triangle: gpd.GeoDataFrame, gdf_triangle_segments: gpd.GeoDataFrame, id_col:str = "triangle_id"):
+def get_bottlenecks(gdf_triangle: gpd.GeoDataFrame, gdf_triangle_segments: gpd.GeoDataFrame, id_col:str = "triangle_id") -> gpd.GeoDataFrame:
+    """
+    Compute the bottleneck dataframe.
+    Project points from the triangles on the constrained segments ("constraint" == True).
+    Keeps only the points on the constrained segments.
+
+    :param gdf_triangle: input triangles
+    :type gdf_triangle: gpd.GeoDataFrame
+    :param gdf_triangle_segments: input triangle segments
+    :type gdf_triangle_segments: gpd.GeoDataFrame
+    :param id_col: column of the triangle index
+    :type id_col: str
+    :return: bottleneck dataframe
+    :rtype: GeoDataFrame
+    """
     # constrained segments
     constrained_seg = gdf_triangle_segments[gdf_triangle_segments["constraint"]].copy()
     constrained_seg = constrained_seg.rename(columns={"geometry": "segment_geom"})
@@ -81,13 +92,17 @@ def get_bottlenecks(gdf_triangle: gpd.GeoDataFrame, gdf_triangle_segments: gpd.G
     result = eligible_with_seg[[id_col, "geometry"]].copy()
     return result.dropna(subset=["geometry"])
 
-def get_profiles(gdf_segments: gpd.GeoDataFrame, line: LineString, direct: bool = True) -> Union[tuple[list[tuple[tuple[float, float],list[int]]], list[tuple[tuple[float, float],list[int]]]], None]:
+def get_profiles(gdf_segments: gpd.GeoDataFrame, line: LineString, direct: bool = True) -> Union[tuple[list[tuple[tuple[float, float],bool,int|None]], list[tuple[tuple[float, float],bool,int|None]]], None]:
+    """
+    Computes the left and right profiles for the input line using the given triangle segments.
+    """
     intersecting_segments = gdf_segments.loc[gdf_segments.intersects(line)]
     intersecting_segments_geometry = intersecting_segments["geometry"]
     intersecting_segments_type = intersecting_segments["type"]
+    intersecting_segments_shared = (intersecting_segments["n_segments"] > 1)
     intersections = [line.intersection(segment) for segment in intersecting_segments_geometry]
-    intersection_zipped = zip(intersections, intersecting_segments_geometry, intersecting_segments_type)
-    def is_not_on_one_end(point: Point, segment: LineString, _: str) -> bool:
+    intersection_zipped = zip(intersections, intersecting_segments_geometry, intersecting_segments_type, intersecting_segments_shared)
+    def is_not_on_one_end(point: Point, segment: LineString, type: str, shared: bool) -> bool:
         """
         True in the intersection is a point and it is not one of the endpoints of the segment.
         """
@@ -98,31 +113,62 @@ def get_profiles(gdf_segments: gpd.GeoDataFrame, line: LineString, direct: bool 
         return None
     distances = [shapely.line_locate_point(line, p[0]) for p in intersection_zipped]
     # unzip
-    intersections, intersecting_segments_geometry, intersecting_segments_type = zip(*intersection_zipped)
+    intersections, intersecting_segments_geometry, intersecting_segments_type, intersecting_segments_shared = zip(*intersection_zipped)
     # zip again with distance
-    zipped: tuple[list[LineString], list[str], list[Point], list[float]] = zip(intersecting_segments_geometry, intersecting_segments_type, intersections, distances) # type: ignore
+    zipped: tuple[list[LineString], list[str], list[bool], list[Point], list[float]] = zip(intersecting_segments_geometry, intersecting_segments_type, intersecting_segments_shared, intersections, distances) # type: ignore
     # sort by distance
-    sorted_intersections = sorted(zipped, key=lambda intersection: intersection[3], reverse=not direct)
+    sorted_intersections = sorted(zipped, key=lambda intersection: intersection[4], reverse=not direct)
     point: tuple[float, ...] = line.coords[0] if direct else line.coords[-1]
-    def update(x, y: tuple[LineString, str, Point, float]):
+    def update(x, y: tuple[LineString, str, bool, Point, float]):
+        # the accumulator x: (the previous point, the index of the current bottleneck, left accumulator, right accumulator)
         previous, index, left, right = x
-        segment, type, intersection, _ = y
+        segment, type, shared, intersection, _ = y
         is_bottleneck = (type == "bottleneck")
         edge_index = index if is_bottleneck else None
         if LinearRing([previous, intersection, segment.coords[0]]).is_ccw:
-            left.append((segment.coords[0], edge_index))
-            right.append((segment.coords[1], edge_index))
+            left.append((segment.coords[0], shared, edge_index))
+            right.append((segment.coords[1], shared, edge_index))
         else:
-            left.append((segment.coords[1], edge_index))
-            right.append((segment.coords[0], edge_index))
+            left.append((segment.coords[1], shared, edge_index))
+            right.append((segment.coords[0], shared, edge_index))
         return (intersection, index + 1 if is_bottleneck else index, left, right)
     _, _, left, right = reduce(update, sorted_intersections, (point, 0, [], [])) # type: ignore
     # removing consecutive identical points
-    def get_b(list: list[tuple[tuple[float, float], int | None]]) -> list[int]:
-        res = [e[1] for e in list if e[1] is not None]
-        print(list)
-        print("\t",res)
-        return res
-    final_left: list[tuple[tuple[float, float],list[int]]] = [(key, get_b(list(g))) for key, g in groupby(left, key=lambda l: l[0])] # type: ignore
-    final_right: list[tuple[tuple[float, float],list[int]]] = [(key, get_b(list(g))) for key, g in groupby(right, key=lambda l: l[0])]
-    return final_left, final_right
+    # def get_b(list: list[tuple[tuple[float, float], bool, int | None]]) -> list[int]:
+    #     """
+    #     Merge bottleneck information. e[2] is a bottleck index (int) or None.
+    #     """
+    #     return [e[2] for e in list if e[2] is not None]
+    # def get_shared(list: list[tuple[tuple[float, float], bool, int | None]]) -> bool:
+    #     """
+    #     Merge shared information.
+    #     """
+    #     return any([e[1] for e in list])
+    # final_left: list[tuple[tuple[float, float],bool,list[int]]] = [(key, get_shared(list(g)), get_b(list(g))) for key, g in groupby(left, key=lambda l: l[0])]
+    # final_right: list[tuple[tuple[float, float],bool,list[int]]] = [(key, get_shared(list(g)), get_b(list(g))) for key, g in groupby(right, key=lambda l: l[0])]
+    # return final_left, final_right
+    return left, right
+
+def merge_profile_points(points: list[tuple[tuple[float, float],bool,int|None]]) -> list[tuple[tuple[float, float],bool,list[int]]]:
+    # removing consecutive identical points
+    def get_b(list: list[tuple[tuple[float, float], bool, int | None]]) -> list[int]:
+        """
+        Merge bottleneck information. e[2] is a bottleck index (int) or None.
+        """
+        return [e[2] for e in list if e[2] is not None]
+    def get_shared(list: list[tuple[tuple[float, float], bool, int | None]]) -> bool:
+        """
+        Merge shared information.
+        """
+        return any([e[1] for e in list])
+    return [(key, get_shared(list(g)), get_b(list(g))) for key, g in groupby(points, key=lambda l: l[0])]
+
+def split_by_first_false(seq, reverse: bool = False):
+    if reverse:
+        seq.reverse()
+    head = list(takewhile(lambda t: t[1] is True, seq))
+    tail = seq[len(head):]
+    if reverse:
+        head.reverse()
+        tail.reverse()
+    return head, tail

@@ -23,7 +23,7 @@ def write_obj(vertices: gpd.GeoSeries, triangles: gpd.GeoSeries, rescale:Callabl
             obj_file.write("f {0} {1} {2}\n".format(triangle_indices[0], triangle_indices[1], triangle_indices[2]))
     obj_file.close()
 
-def export(point_geom: gpd.GeoSeries, triangles: gpd.GeoSeries, output: str, output_range_x: float|None = None, z_rescale: float = 1.0):
+def export(point_geom: gpd.GeoSeries, triangles: gpd.GeoSeries, output: str, output_range_x: float|None = None, z_rescale: float = 1.0, rescale: bool = True):
     min_x, min_y, max_x, max_y = triangles.total_bounds
     # min_x = triangles.x.min()
     # max_x = triangles.x.max()
@@ -40,7 +40,7 @@ def export(point_geom: gpd.GeoSeries, triangles: gpd.GeoSeries, output: str, out
             (point.y - min_y) * range_out_y / range_y - range_out_y / 2.0, 
             point.z * z_rescale
         )
-    write_obj(point_geom, triangles, rescale_point, output) # type: ignore
+    write_obj(point_geom, triangles, rescale_point if rescale else lambda p: p, output) # type: ignore
     # thefile = open(output, 'w')
     # for _, vertex in point_geom.items():
     #     point: Point = vertex # type: ignore
@@ -84,4 +84,7 @@ points = gpd.read_file(input, layer=point_layer)
 point_geom: gpd.GeoSeries = points.geometry.drop_duplicates().reset_index(drop=True)# type: ignore
 print(point_layer)
 export(point_geom, triangles.geometry, f'{point_layer}.obj', output_range_x, z_rescale)
+point_layer = f"{point_layer}_no_rescaling"
+print(point_layer)
+export(point_geom, triangles.geometry, f'{point_layer}.obj', rescale=False)
 print("All done!")

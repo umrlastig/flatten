@@ -3,7 +3,22 @@ import shapely
 from shapely import Point, LineString
 import networkx as nx
 
-def get_triangle_graph(gdf_triangle: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def get_triangle_graph_as_nx(gdf_triangle: gpd.GeoDataFrame) -> nx.Graph:
+    touching_triangles = gdf_triangle.sjoin(gdf_triangle, predicate="touches")
+    graph = nx.Graph()
+    for triangle_id_left, triangle_id_right in zip(touching_triangles["triangle_id_left"], touching_triangles["triangle_id_right"]):
+        if triangle_id_left < triangle_id_right:
+            geom_left: shapely.Polygon = gdf_triangle.at[triangle_id_left, "geometry"] # type: ignore
+            geom_right: shapely.Polygon = gdf_triangle.at[triangle_id_right, "geometry"] # type: ignore
+            if geom_left.intersection(geom_right).length > 0:
+                if triangle_id_left > triangle_id_right:
+                    graph.add_edge(triangle_id_right, triangle_id_left, geometry = LineString([geom_right.centroid, geom_left.centroid]))
+                else:
+                    graph.add_edge(triangle_id_left, triangle_id_right, geometry = LineString([geom_left.centroid, geom_right.centroid]))
+    print("graph edges",graph.number_of_edges())
+    return graph
+
+def get_triangle_graph_as_gdf(gdf_triangle: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     touching_triangles = gdf_triangle.sjoin(gdf_triangle, predicate="touches")
     edges = []
     for triangle_id_left, triangle_id_right in zip(touching_triangles["triangle_id_left"], touching_triangles["triangle_id_right"]):
