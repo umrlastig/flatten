@@ -3,8 +3,9 @@ from typing import Union
 from functools import reduce
 from itertools import groupby
 
+import numpy as np
 import pandas as pd
-from shapely import LineString, LinearRing, Point
+from shapely import LineString, LinearRing, Point, Polygon
 import geopandas as gpd
 import shapely
 import networkx as nx
@@ -121,7 +122,7 @@ def merge_profile_points(
 
     return [build(key, list(g)) for key, g in groupby(points, key=lambda l: l[0])]
 
-def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length: float, output_file: str | None) -> gpd.GeoDataFrame | None:
+def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length: float, output_file: str | None) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame] | None:
     logger.info(f"{datetime.now()} - start")
     box = (in_box[0], in_box[1], in_box[2], in_box[3], srs)
     r = get_hydro_data(box, srs)
@@ -281,7 +282,7 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
             output_file, layer="triangle_segment", driver="GPKG"
         )
     logger.info(f"{datetime.now()} - all done!")
-    return gdf_points
+    return gdf_points, gdf_split
 
 if __name__ == "__main__":
     logger.setLevel("DEBUG")
@@ -292,5 +293,29 @@ if __name__ == "__main__":
     max_segment_length = 20.0
     res = main(srs, box, max_segment_length, output_file)
     if res is not None:
-        points, temp = optimize(res)
+        points, triangles = res
+        points, _ = optimize(points)
         points.to_file(output_file, layer="points_optimised")
+        final_triangles = []
+        for _, triangle in triangles.iterrows():
+            new_triangle = triangle.copy()
+            coords = triangle["geometry"].exterior.coords
+            triangle_indices = []
+            for coord in coords:
+                tol = 1e-9
+                mask = (np.abs(points.geometry.x - coord[0]) < tol) & (
+                    np.abs(points.geometry.y - coord[1]) < tol
+                )
+                matches = points.geometry[mask]
+                if any(matches):
+                    triangle_indices.append(matches.index[0])
+            if (len(triangle_indices) == 4):
+                new_triangle["geometry"] = Polygon([
+                    points.geometry.iat[triangle_indices[0]], # type: ignore
+                    points.geometry.iat[triangle_indices[1]], # type: ignore
+                    points.geometry.iat[triangle_indices[2]], # type: ignore
+                    points.geometry.iat[triangle_indices[0]], # type: ignore
+                ])
+                final_triangles.append(new_triangle)
+        final_triangles_gdf = gpd.GeoDataFrame(final_triangles, crs=points.crs)
+        final_triangles_gdf.to_file(output_file, layer="triangles_optimised")
