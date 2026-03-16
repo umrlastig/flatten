@@ -5,20 +5,10 @@ import numpy as np
 from itertools import chain
 from shapely import Point
 from tqdm import tqdm
+import math
+import logging
 
-
-print(datetime.now(), "Start")
-# data
-points = gpd.read_file("temp.gpkg", layer="points")
-
-segment_orders = sorted(points["segment_order"].unique().tolist())
-
-counts = points.groupby("geometry")[["segment_order"]].count()
-shared_points = counts[counts["segment_order"] > 1]
-fixed_heights = dict[Point, float | None]()
-for p in shared_points.index.tolist():
-    fixed_heights[p] = None
-
+logger = logging.getLogger(__name__)
 
 def optimize_segment(
     segment_left: gpd.GeoDataFrame,
@@ -27,6 +17,7 @@ def optimize_segment(
     alpha: float = 1.0,
     beta: float = 10.0,
     gamma: float = 0.1,
+    bottlenecks_as_string: bool = False
 ):
     """
     Optimize a segment with segment_order.
@@ -37,6 +28,7 @@ def optimize_segment(
     :type beta: float
     :param gamma: weight of the smoothness (gamma > 0 activates smoothness)
     :type gamma: float
+    :param bottlenecks_as_string: true if reading from file (bottleneck info is converted to string), false otherwise
     """
     tol = 1e-9
 
@@ -46,10 +38,10 @@ def optimize_segment(
 
     bottlenecks_left = list(
         map(values_from_string, segment_left["point_bottlenecks"].tolist())
-    )
+    ) if bottlenecks_as_string else segment_left["point_bottlenecks"].tolist()
     bottlenecks_right = list(
         map(values_from_string, segment_right["point_bottlenecks"].tolist())
-    )
+    ) if bottlenecks_as_string else segment_right["point_bottlenecks"].tolist()
     bottlenecks = np.array(list(chain.from_iterable(bottlenecks_left)))
     pairs = []
     if len(bottlenecks) > 0:
@@ -120,12 +112,27 @@ def optimize_segment(
         constraints.append(zR[idx] == height)
     # solve
     prob = cp.Problem(cp.Minimize(obj), constraints)
-    prob.solve(solver=cp.OSQP, max_iter=100_000)
+    res = prob.solve(solver=cp.OSQP, max_iter=100_000)
+        
     # results
     zL_opt = zL.value
     zR_opt = zR.value
-    # print(n, m)
-    # print(np.shape(zL_opt)[0], np.shape(zR_opt)[0]) # type: ignore
+
+    if isinstance(res, float) and (math.isinf(res)):
+        logger.error(f"res = {res}")
+        logger.error(f"segment_order = {segment_left["segment_order"].tolist()[0]}")
+        logger.error(f"left = {segment_left["geometry"].tolist()}")
+        logger.error(f"right = {segment_right["geometry"].tolist()}")
+        logger.error(f"fixed_left = {fixed_left}")
+        logger.error(f"fixed_right = {fixed_right}")
+        logger.error(f"zL0 = {zL0.tolist()}")
+        logger.error(f"zR0 = {zR0.tolist()}")
+        logger.debug(f"zL_opt = {zL_opt}")
+        logger.debug(f"zR_opt = {zR_opt}")
+    if (zL_opt is None) or (zR_opt is None):
+        return None, None
+
+    # logger.debug(f"outshape = {np.shape(zL_opt)[0]}, {np.shape(zR_opt)[0]}") # type: ignore
     # add new fixed height
     for key, value in fixed_heights.items():
         if value is None:
@@ -135,7 +142,6 @@ def optimize_segment(
             ]
             if len(matches) > 0:
                 for i in matches["point_order"]:
-                    # print(key, "Found left", i, zL_opt[i]) # type: ignore
                     fixed_heights[key] = zL_opt[i]  # type: ignore
             matches = segment_right[
                 (np.abs(segment_right["geometry"].x - key.x) < tol)
@@ -158,70 +164,84 @@ def modify_heights(
         )
         points.loc[mask, "geometry"] = Point(p.x, p.y, z)  # type: ignore
 
+def optimize(points: gpd.GeoDataFrame, bottlenecks_as_string: bool = False):
+    segment_orders = sorted(points["segment_order"].unique().tolist())
 
-temp = dict()
-for segment_order in tqdm(segment_orders):
-    # get left and right points
-    segment_left = points[
-        (points["segment_order"] == segment_order)
-        & (points["point_position"] == "left")
-    ].sort_values(by=["point_order"])
-    segment_right = points[
-        (points["segment_order"] == segment_order)
-        & (points["point_position"] == "right")
-    ].sort_values(by=["point_order"])
-    # print(segment_order)
-    zL_opt, zR_opt = optimize_segment(
-        segment_left, segment_right, fixed_heights, beta=100.0
-    )
-    if zL_opt is not None:
-        modify_heights(points, segment_left, zL_opt.tolist())
-        # for p, z in zip(segment_left["geometry"], zL_opt.tolist()):
-        #     points.loc[points['geometry'] == p, 'geometry'] = Point(p.x, p.y, z) # type: ignore
-    if zR_opt is not None:
-        modify_heights(points, segment_right, zR_opt.tolist())
-        # for p, z in zip(segment_right["geometry"], zR_opt.tolist()):
-        #     points.loc[points['geometry'] == p, 'geometry'] = Point(p.x, p.y, z) # type: ignore
-    opt_left = points[
-        (points["segment_order"] == segment_order)
-        & (points["point_position"] == "left")
-    ].sort_values(by=["point_order"])
-    opt_right = points[
-        (points["segment_order"] == segment_order)
-        & (points["point_position"] == "right")
-    ].sort_values(by=["point_order"])
-    # temp[segment_order] = (segment_left["geometry"].z, segment_right["geometry"].z, zL_opt, zR_opt)
-    temp[segment_order] = (
-        segment_left["geometry"].z,
-        segment_right["geometry"].z,
-        opt_left["geometry"].z,
-        opt_right["geometry"].z,
-    )
+    counts = points.groupby("geometry")[["segment_order"]].count()
+    shared_points = counts[counts["segment_order"] > 1]
+    fixed_heights = dict[Point, float | None]()
+    for p in shared_points.index.tolist():
+        fixed_heights[p] = None
 
-points.to_file("temp.gpkg", layer="points_optimised")
+    temp = dict()
+    for segment_order in tqdm(segment_orders):
+        # get left and right points
+        segment_left = points[
+            (points["segment_order"] == segment_order)
+            & (points["point_position"] == "left")
+        ].sort_values(by=["point_order"])
+        segment_right = points[
+            (points["segment_order"] == segment_order)
+            & (points["point_position"] == "right")
+        ].sort_values(by=["point_order"])
+        # logger.debug(f"segment {segment_order}")
+        zL_opt, zR_opt = optimize_segment(
+            segment_left, segment_right, fixed_heights, beta=100.0, bottlenecks_as_string = bottlenecks_as_string
+        )
+        if zL_opt is not None:
+            modify_heights(points, segment_left, zL_opt.tolist())
+        if zR_opt is not None:
+            modify_heights(points, segment_right, zR_opt.tolist())
+        opt_left = points[
+            (points["segment_order"] == segment_order)
+            & (points["point_position"] == "left")
+        ].sort_values(by=["point_order"])
+        opt_right = points[
+            (points["segment_order"] == segment_order)
+            & (points["point_position"] == "right")
+        ].sort_values(by=["point_order"])
+        temp[segment_order] = (
+            segment_left["geometry"].z,
+            segment_right["geometry"].z,
+            opt_left["geometry"].z,
+            opt_right["geometry"].z,
+        )
+    return points, temp
 
-print(datetime.now(), "All done!")
+def main():
+    logger.info(f"{datetime.now()} Start")
+    # data
+    points = gpd.read_file("triangle_graph.gpkg", layer="points")
 
+    points, temp = optimize(points, True)
 
-def show_plot(show: int):
-    zL0, zR0, zL_opt, zR_opt = temp[show]
-    n = len(zL0)
-    m = len(zR0)
-    import matplotlib.pyplot as plt
+    points.to_file("triangle_graph.gpkg", layer="points_optimised")
 
-    fig, (ax0, ax1) = plt.subplots(ncols=2, figsize=(12, 6), sharey=True)
-    ax0.plot(np.arange(n), np.array(zL0), "C0.-", markersize=12)
-    ax0.plot(np.arange(n), zL_opt, "C1.-", markersize=12)
-    ax0.legend((f"Left profile for {show}"), loc="lower right")
-    ax0.set_title("Left")
+    print(f"{datetime.now()} All done!")
 
-    ax1.plot(np.arange(m), np.array(zR0), "C0.-", markersize=12)
-    ax1.plot(np.arange(m), zR_opt, "C1.-", markersize=12)
-    ax1.legend((f"Right profile for {show}"), loc="lower right")
-    ax1.set_title("Right")
+    def show_plot(show: int):
+        zL0, zR0, zL_opt, zR_opt = temp[show]
+        n = len(zL0)
+        m = len(zR0)
+        import matplotlib.pyplot as plt
 
-    plt.show()
+        fig, (ax0, ax1) = plt.subplots(ncols=2, figsize=(12, 6), sharey=True)
+        ax0.plot(np.arange(n), np.array(zL0), "C0.-", markersize=12)
+        ax0.plot(np.arange(n), zL_opt, "C1.-", markersize=12)
+        ax0.legend((f"Left profile for {show}"), loc="lower right")
+        ax0.set_title("Left")
 
+        ax1.plot(np.arange(m), np.array(zR0), "C0.-", markersize=12)
+        ax1.plot(np.arange(m), zR_opt, "C1.-", markersize=12)
+        ax1.legend((f"Right profile for {show}"), loc="lower right")
+        ax1.set_title("Right")
 
-show_plot(25)
-# show_plot(16)
+        plt.show()
+
+    # show_plot(25)
+    # show_plot(16)
+
+if __name__ == "__main__":
+    logger.setLevel("DEBUG")
+    logger.addHandler(logging.StreamHandler())
+    main()

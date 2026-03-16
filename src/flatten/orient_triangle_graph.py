@@ -1,14 +1,18 @@
+from flatten.utils import get_triangles
 from flatten.wfs import get_hydro_data
 from flatten.triangle_graph import get_triangle_graph_as_nx
 from shapely import LineString, union_all, constrained_delaunay_triangles
 import geopandas as gpd
 import pandas as pd
 import networkx as nx
+from networkx.algorithms.dag import descendants
 from itertools import groupby
 from typing import List, Tuple, Set, Any
 import logging
 
 logger = logging.getLogger(__name__)
+logger.setLevel("DEBUG")
+logger.addHandler(logging.StreamHandler())
 
 
 def split_cycle_on_change(
@@ -53,11 +57,11 @@ def split_cycle(cycle: List[Any], split_nodes: Set[Any]) -> List[List[Any]]:
     ]
 
 
-def add_path(G: nx.DiGraph, sub_path: List[Any], is_start_outgoing: bool):
-    if is_start_outgoing:
+def add_path(G: nx.MultiDiGraph, sub_path: List[Any], reverse: bool):
+    if reverse:
         sub_path.reverse()
     for i in range(len(sub_path) - 1):
-        if not G.has_edge(sub_path[i + 1], sub_path[i]):
+        if (not G.has_edge(sub_path[i], sub_path[i + 1])) & (not G.has_edge(sub_path[i + 1], sub_path[i])):
             G.add_edge(
                 sub_path[i],
                 sub_path[i + 1],
@@ -70,28 +74,16 @@ def add_path(G: nx.DiGraph, sub_path: List[Any], is_start_outgoing: bool):
                 ),
             )
 
+def get_nodes_accessible_from(G: nx.MultiDiGraph, node: Any, cycle_nodes: Set[Any]) -> int:
+    """Get the number of nodes accessible from `node` outside of the cycle"""
+    if len(set(G.successors(node)).difference(cycle_nodes)) == 0:
+        return 0
+    return len(descendants(G, node).difference(cycle_nodes))
 
-def main():
-    srs = "urn:ogc:def:crs:EPSG::2154"
-    box = (1036535, 6289927, 1042268, 6305786, srs)
-    output_file = "triangle_graph.gpkg"
-    r = get_hydro_data(box, srs)
-    if not r:
-        logger.error("no data")
-        return
-    (surfaces, gdf_segment, _) = r
-    union = union_all(surfaces.geometry).simplify(0.1, preserve_topology=True)
-    triangles = constrained_delaunay_triangles(union)
-    triangle_list = [p for p in triangles.geoms]
-    gdf_triangle = gpd.GeoDataFrame(
-        pd.DataFrame(
-            {
-                "triangle_id": list(range(0, len(triangle_list))),
-            }
-        ),
-        geometry=triangle_list,
-        crs=surfaces.crs,
-    )
+def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataFrame) -> tuple[nx.MultiDiGraph, gpd.GeoDataFrame, bool]:
+    """
+    Create an oriented multi graph from the the hydrographic segments and the surfaces.
+    """
     # triangle_graph_gdf = get_triangle_graph_as_gdf(gdf_triangle)
     triangle_graph = get_triangle_graph_as_nx(gdf_triangle)
     gdf_segment["_edge_idx"] = gdf_segment.index  # just in case the index isn’t numeric
@@ -125,7 +117,7 @@ def main():
         .apply(list)
         .reset_index(name="tri_sequence")
     )
-    G = nx.DiGraph()
+    G = nx.MultiDiGraph()
 
     # Add all triangle IDs as nodes (optional – NetworkX will auto‑add them)
     G.add_nodes_from(gdf_triangle["triangle_id"])
@@ -142,7 +134,8 @@ def main():
             # If you want to keep track of *which* original edge created this arc:
             if G.has_edge(src, dst):
                 # Append to a list of edge_ids that share the same arc
-                G[src][dst]["edge_ids"].append(edge_id)
+                for key in G[src][dst].keys():
+                    G[src][dst][key]["edge_ids"].append(edge_id)
             else:
                 # check if the opposite edge exists
                 # TODO sort principal segments first?
@@ -158,8 +151,8 @@ def main():
                         ),
                     )
 
-    logger.info("Number of triangle nodes:", G.number_of_nodes())
-    logger.info("Number of directed arcs :", G.number_of_edges())
+    logger.info(f"Number of triangle nodes: {G.number_of_nodes()}")
+    logger.info(f"Number of directed arcs : {G.number_of_edges()}")
 
     # find the cycles in the triangle graph and connect them to the directed graph
     connected_nodes = set(filter(lambda n: len(list(G.neighbors(n))) > 0, G.nodes()))
@@ -167,12 +160,12 @@ def main():
     for cycle in triangle_graph_cycles:
         shared = set(cycle).intersection(connected_nodes)
         if len(shared) == len(cycle):
-            logger.debug("cycle complete", cycle)
+            logger.debug(f"cycle complete: {cycle}")
         else:
             if len(shared) == 0:
-                logger.debug("cycle without common node", cycle)
+                logger.debug(f"cycle without common node: {cycle}")
             else:
-                logger.debug("cycle incomplete", cycle)
+                logger.debug(f"cycle incomplete: {cycle}")
                 # we split at the points with 3 edges that belong to both graphs
                 split_nodes = set(
                     filter(lambda n: len(list(triangle_graph.neighbors(n))) > 2, cycle)
@@ -182,34 +175,35 @@ def main():
                     sub_path_shared = set(sub_path).intersection(connected_nodes)
                     if len(sub_path_shared) < len(sub_path):
                         # there are unshared nodes
-                        logger.debug("sub_path", sub_path)
+                        logger.debug(f"sub_path: {sub_path}")
                         start = sub_path[0]
-                        # find out if start has a successor outside the cycle
-                        successors = list(G.successors(start))
-                        # logger.debug("neighbors",successors)
-                        outside = set(successors).difference(set(cycle))
-                        # logger.debug("outside",outside)
-                        # determine if outgoind edge (start has a successor outside)
-                        is_start_outgoing = len(outside) > 0
-                        add_path(G, sub_path, is_start_outgoing)
+                        # find out if start has successors outside the cycle
+                        desc_start = get_nodes_accessible_from(G, start, set(cycle))
+                        end = sub_path[-1]
+                        # find out if end has successors outside the cycle
+                        desc_end = get_nodes_accessible_from(G, end, set(cycle))
+                        logger.debug(f"start: {start} => {desc_start}")
+                        logger.debug(f"end: {end} => {desc_end}")
+                        add_path(G, sub_path, desc_start >= desc_end)
 
     connected_nodes = set(filter(lambda n: len(list(G.neighbors(n))) > 0, G.nodes()))
     # connect the remaining edges from the triangle graph starting from the ones connected to the directed graph
-    while len(connected_nodes) < len(G.nodes):
-        edges = [
-            (a, b)
-            for (a, b) in triangle_graph.edges
-            if (a in connected_nodes) ^ (b in connected_nodes)
-        ]
-        for a, b in edges:
-            start = a if a in connected_nodes else b
-            end = b if a in connected_nodes else a
-            add_path(G, [start, end], False)
-            connected_nodes.add(end)
+    # while len(connected_nodes) < len(G.nodes):
+    #     edges = [
+    #         (a, b)
+    #         for (a, b) in triangle_graph.edges
+    #         if (a in connected_nodes) ^ (b in connected_nodes)
+    #         # a or b has to be connected but not both
+    #     ]
+    #     for a, b in edges:
+    #         start = a if a in connected_nodes else b
+    #         end = b if a in connected_nodes else a
+    #         add_path(G, [start, end], True)
+    #         connected_nodes.add(end)
 
     # Show arcs with the originating edge(s)
-    for u, v, data in G.edges(data=True):
-        logger.debug(f"{u} → {v}  (via edge(s): {data['edge_ids']})")
+    # for u, v, data in G.edges(data=True):
+    #     logger.debug(f"{u} → {v}  (via edge(s): {data['edge_ids']})")
 
     records = []
     for u, v, data in G.edges(data=True):
@@ -224,14 +218,26 @@ def main():
         )
 
     # Create the GeoDataFrame
-    edge_gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=surfaces.crs)
-    edge_gdf.to_file(output_file, layer="edges")
+    edge_gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=gdf_triangle.crs)
     cycles = list(nx.simple_cycles(G))
-    for cycle in cycles:
-        logger.debug(cycle)
-    # assert(len(cycles) == 0) # make sure there is no cycle
+    return G, edge_gdf, len(cycles) == 0
+
+def main():
+    srs = "urn:ogc:def:crs:EPSG::2154"
+    box = (1036535, 6289927, 1042268, 6305786, srs)
+    output_file = "triangle_graph.gpkg"
+    r = get_hydro_data(box, srs)
+    if not r:
+        logger.error("no data")
+        return
+    (surfaces, gdf_segment, _) = r
+    triangles = get_triangles(surfaces, 20.0)
+    _, edge_gdf, has_no_cycle = get_oriented_graph(triangles, gdf_segment)
+    edge_gdf.to_file(output_file, layer="edges")
+    assert(has_no_cycle) # make sure there is no cycle
     logger.debug("All done!")
 
-
 if __name__ == "__main__":
+    logger.setLevel("DEBUG")
+    logger.addHandler(logging.StreamHandler())
     main()

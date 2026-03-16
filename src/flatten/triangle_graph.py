@@ -1,8 +1,7 @@
 import geopandas as gpd
 import shapely
-from shapely import Point, LineString
+from shapely import LineString
 import networkx as nx
-
 
 def get_triangle_graph_as_nx(gdf_triangle: gpd.GeoDataFrame) -> nx.Graph:
     touching_triangles = gdf_triangle.sjoin(gdf_triangle, predicate="touches")
@@ -50,59 +49,27 @@ def get_triangle_graph_as_gdf(gdf_triangle: gpd.GeoDataFrame) -> gpd.GeoDataFram
     print("gdf_edges", len(gdf_edges))
     return gdf_edges  # type: ignore
 
-
-def orient_triangle_graph(gdf_edges: gpd.GeoDataFrame, gdf_triangle: gpd.GeoDataFrame):
-    def orient(line: LineString) -> LineString:
-        coords = shapely.get_coordinates(line, include_z=False).tolist()
-        start = coords[0]
-        end = coords[-1]
-        triangles_containing = gdf_triangle[
-            gdf_triangle.geometry.contains(Point(start))
-        ]
-        start_height = triangles_containing.iloc[0]["triangle_elevation_rge"]
-        triangles_containing = gdf_triangle[gdf_triangle.geometry.contains(Point(end))]
-        end_height = triangles_containing.iloc[0]["triangle_elevation_rge"]
-        if start_height > end_height:
-            return line.reverse()
-        return line
-
-    gdf_edges["oriented"] = gdf_edges.apply(lambda row: orient(row.geometry), axis=1)
-    gdf_edges = gdf_edges.set_geometry("oriented", crs=gdf_triangle.crs)
-    gdf_edges = gdf_edges.drop(columns=["geometry"])
-    return gdf_edges
-
-
-def orient_hydrograph(graph: nx.Graph, sources, targets) -> nx.DiGraph:
-    # 1. BFS from targets to compute downstream distance
-    from collections import deque
-
-    dist: dict[str, float | None] = {v: None for v in graph.nodes}
-    q = deque()
-    for t in targets:
-        dist[t] = 0
-        q.append(t)
-    while q:
-        cur = q.popleft()
-        for nb in graph.neighbors(cur):  # neighbors(cur, E):
-            if dist[nb] is None:
-                dist[nb] = dist[cur] + 1  # type: ignore
-                q.append(nb)
-    # 2. Orient edges
-    directed_graph = nx.DiGraph()
-    # directed_edges = []
-    for u, v in graph.edges:
-        du, dv = dist[u], dist[v]
-        if du is None or dv is None:
-            # component without a target – skip or flag
-            continue
-        if du > dv:
-            # directed_edges.append((u, v))   # u → v
-            directed_graph.add_edge(u, v)
-        elif dv > du:
-            # directed_edges.append((v, u))   # v → u
-            directed_graph.add_edge(v, u)
-        else:
-            # tie – resolve deterministically
-            # directed_edges.append((min(u, v), max(u, v)))
-            directed_graph.add_edge(min(u, v), max(u, v))
+def reverse(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
+    """reverses the directed graph."""
+    directed_graph = nx.MultiDiGraph()
+    for u, v, key, data in graph.edges(keys=True, data=True):
+        line: LineString = data["geometry"]
+        edge_ids = data.get("edge_ids", [])
+        directed_graph.add_edge(v, u, key=key, geometry = line.reverse(), edge_ids = edge_ids)
     return directed_graph
+
+def remove_interstitial_nodes(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
+    """Removes nodes of in degree 1 and out_degree 1 from the directed graph."""
+    directed_graph = graph.copy()
+    nodes_to_remove = []
+    for node in directed_graph.nodes:
+        if (directed_graph.in_degree(node) == 1) & (directed_graph.out_degree(node) == 1): # type: ignore
+            (pred_node, _, in_key, pred_data) = list(directed_graph.in_edges(node,keys=True,data=True))[0] # type: ignore
+            (_, succ_node, out_key, succ_data) = list(directed_graph.out_edges(node,keys=True,data=True))[0] # type: ignore
+            geom = shapely.line_merge(shapely.GeometryCollection([pred_data["geometry"],succ_data["geometry"]])) # type: ignore
+            ids = sorted(list(set(pred_data["edge_ids"] + succ_data["edge_ids"]))) # type: ignore
+            directed_graph.remove_edges_from([(pred_node, node, in_key), (node, succ_node, out_key)])
+            nodes_to_remove.append(node)
+            directed_graph.add_edge(pred_node, succ_node, geometry = geom, edge_ids = ids)
+    directed_graph.remove_nodes_from(nodes_to_remove)
+    return directed_graph # type: ignore

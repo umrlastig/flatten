@@ -16,8 +16,12 @@ from flatten.utils import (
     get_profiles,
     split_by_first_false,
     merge_profile_points,
+    split_triangles_with_bottlenecks,
 )
 from flatten.wfs import get_hydro_data
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def get_directed_graph(segment: gpd.GeoDataFrame, reverse=False) -> nx.DiGraph:
@@ -89,7 +93,7 @@ def get_sources_and_targets(segment: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     )
 
 
-def get_triangles(union, crs, sample_points, elevations) -> gpd.GeoDataFrame:
+def get_triangles_with_height(union, crs, sample_points, elevations) -> gpd.GeoDataFrame:
     triangles = shapely.constrained_delaunay_triangles(union)
 
     def triangle_height(geom: shapely.Polygon) -> float:
@@ -127,8 +131,9 @@ def get_triangles(union, crs, sample_points, elevations) -> gpd.GeoDataFrame:
     return gdf_triangle
 
 
-def get_graph(surfaces: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    union = shapely.union_all(surfaces.geometry).simplify(0.1, preserve_topology=True)
+def get_graph(surfaces: gpd.GeoDataFrame, max_segment_length: float) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    # union = shapely.union_all(surfaces.geometry).simplify(0.1, preserve_topology=True)
+    union = shapely.union_all(surfaces.geometry).segmentize(max_segment_length)
     # sample points
     number_of_points = int(
         union.area / 10000
@@ -141,7 +146,7 @@ def get_graph(surfaces: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, gpd.GeoData
     elevations = throttle_requests(list(transformer.itransform(sample_points)))
     assert len(elevations) == len(sample_points)
 
-    gdf_triangle = get_triangles(union, surfaces.crs, sample_points, elevations)
+    gdf_triangle = get_triangles_with_height(union, surfaces.crs, sample_points, elevations)
     # triangle_graph: gpd.GeoDataFrame = get_triangle_graph(gdf_triangle)
     # triangle_graph = neatnet.remove_interstitial_nodes(triangle_graph) # type: ignore
     # print("triangle_graph",len(triangle_graph))
@@ -169,6 +174,7 @@ def get_graph(surfaces: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, gpd.GeoData
     )
     gdf_bottlenecks = get_bottlenecks(gdf_triangle, gdf_triangle_segment)
 
+    gdf_split = split_triangles_with_bottlenecks(gdf_triangle, gdf_bottlenecks)
     def add_height(row) -> Optional[LineString]:
         line = row["geometry"]
         if not line:
@@ -210,7 +216,7 @@ def get_graph(surfaces: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, gpd.GeoData
     # recompute height for all segments
     unified["geometry"] = unified.apply(add_height, axis=1)
     unified = unified.set_crs(gdf_triangle_segment.crs, allow_override=True)  # type: ignore
-    return gdf_triangle, unified  # type: ignore #, oriented_triangle_graph#gdf_edges
+    return gdf_triangle, unified, gdf_split  # type: ignore #, oriented_triangle_graph#gdf_edges
 
 
 def add_intersection_column(
@@ -274,227 +280,224 @@ def main():
     output_file = "temp.gpkg"
 
     r = get_hydro_data(box, srs)
-    if r:
-        (surface, segment, node) = r
-        gdf_nodes = get_sources_and_targets(segment)
-        gdf_triangle, gdf_triangle_segment = get_graph(surface)
-        # keep only the unconstrained segments
-        unconstrained_triangle_segment = gdf_triangle_segment.query(
-            'type != "constrained"'
-        )
-        # intersect them with the hydro segments
-        res_intersection = unconstrained_triangle_segment.overlay(
-            segment, how="intersection", keep_geom_type=False
-        )
-        res_intersection = filter_intersections_on_endpoints(
-            unconstrained_triangle_segment, res_intersection
-        )
-        # count the intersection for the triangle segments
-        gdf_triangle_segment = add_intersection_column(
-            gdf_triangle_segment, res_intersection, "triangle_segment_id", "n_segments"
-        )
-        # add the id of the most important segment
-        agg = (
-            res_intersection.groupby("triangle_segment_id")
-            .apply(
-                lambda df: choose_id(
-                    df["cleabs"].tolist(),  # type: ignore
-                    df["numero_d_ordre"].tolist(),  # type: ignore
-                    df["type_de_bras"].tolist(),  # type: ignore
-                )  # type: ignore
+    if r is None:
+        logger.error("no data")
+        return
+    (surface, segment, node) = r
+    gdf_nodes = get_sources_and_targets(segment)
+    gdf_triangle, gdf_triangle_segment, split = get_graph(surface, 20.0)
+    # keep only the unconstrained segments
+    unconstrained_triangle_segment = gdf_triangle_segment.query(
+        'type != "constrained"'
+    )
+    # intersect them with the hydro segments
+    res_intersection = unconstrained_triangle_segment.overlay(
+        segment, how="intersection", keep_geom_type=False
+    )
+    res_intersection = filter_intersections_on_endpoints(
+        unconstrained_triangle_segment, res_intersection
+    )
+    # count the intersection for the triangle segments
+    gdf_triangle_segment = add_intersection_column(
+        gdf_triangle_segment, res_intersection, "triangle_segment_id", "n_segments"
+    )
+    # add the id of the most important segment
+    agg = (
+        res_intersection.groupby("triangle_segment_id")
+        .apply(
+            lambda df: choose_id(
+                df["cleabs"].tolist(),  # type: ignore
+                df["numero_d_ordre"].tolist(),  # type: ignore
+                df["type_de_bras"].tolist(),  # type: ignore
             )  # type: ignore
-            .reset_index()
-            .rename(columns={0: "hydro_segment_id"})
+        )  # type: ignore
+        .reset_index()
+        .rename(columns={0: "hydro_segment_id"})
+    )
+    gdf_triangle_segment = (
+        gdf_triangle_segment.copy()
+        .reset_index()
+        .merge(agg, how="left", on="triangle_segment_id")
+    )
+    gdf_triangle_segment["hydro_segment_id"] = gdf_triangle_segment[
+        "hydro_segment_id"
+    ].astype("str")
+    print("segment\n", segment)
+    directed_graph = get_directed_graph(segment, True)
+    edges = list(nx.topological_sort(nx.line_graph(directed_graph)))
+    segment_order = []
+    segment_id = []
+    point_order = []
+    point_position = []
+    point_geom = []
+    point_bottlenecks = []
+    edge_profiles = dict()
+    for edge_order, edge in enumerate(edges):
+        attributes = directed_graph.get_edge_data(*edge)
+        segment_key = attributes["edge_key"]
+        segment_geometry = attributes["edge_geometry"]
+        profiles = get_profiles(
+            gdf_triangle_segment[
+                gdf_triangle_segment["hydro_segment_id"] == segment_key
+            ],
+            line=segment_geometry,
         )
-        gdf_triangle_segment = (
-            gdf_triangle_segment.copy()
-            .reset_index()
-            .merge(agg, how="left", on="triangle_segment_id")
-        )
-        gdf_triangle_segment["hydro_segment_id"] = gdf_triangle_segment[
-            "hydro_segment_id"
-        ].astype("str")
-        # segment = add_intersection_column(segment, res_intersection, "cleabs", "n_intersections")
-        # gdf_shared_triangle_segment = gdf_triangle_segment.query('n_segments > 1')
-        # res_shared_intersection = res_intersection[res_intersection['triangle_segment_id'].isin(gdf_shared_triangle_segment["triangle_segment_id"])]
-        # segment = add_intersection_column(segment, res_shared_intersection, "cleabs", "n_shared_intersections")
-        print("segment\n", segment)
-        directed_graph = get_directed_graph(segment, True)
-        edges = list(nx.topological_sort(nx.line_graph(directed_graph)))
-        segment_order = []
-        segment_id = []
-        point_order = []
-        point_position = []
-        point_geom = []
-        point_bottlenecks = []
-        edge_profiles = dict()
-        for edge_order, edge in enumerate(edges):
-            attributes = directed_graph.get_edge_data(*edge)
+        if profiles:
+            left, right = profiles
+            edge_profiles[edge] = (left, right)
+    print(len(directed_graph.edges), "edges")
+    # move shared points up or down
+    for graph_edge in directed_graph.edges:
+        if graph_edge in edge_profiles:
+            left, right = edge_profiles[graph_edge]
+            attributes = directed_graph.get_edge_data(*graph_edge)
             segment_key = attributes["edge_key"]
-            segment_geometry = attributes["edge_geometry"]
-            profiles = get_profiles(
-                gdf_triangle_segment[
-                    gdf_triangle_segment["hydro_segment_id"] == segment_key
-                ],
-                line=segment_geometry,
-            )
-            if profiles:
-                left, right = profiles
-                edge_profiles[edge] = (left, right)
-        print(len(directed_graph.edges), "edges")
-        # move shared points up or down
-        for graph_edge in directed_graph.edges:
-            if graph_edge in edge_profiles:
-                left, right = edge_profiles[graph_edge]
-                attributes = directed_graph.get_edge_data(*graph_edge)
-                segment_key = attributes["edge_key"]
-                if (left[0][1] is True) & (right[0][1] is True):
-                    in_edges = list(directed_graph.in_edges(graph_edge[0]))
+            if (left[0][1] is True) & (right[0][1] is True):
+                in_edges = list(directed_graph.in_edges(graph_edge[0]))
+                print(
+                    "shared at start",
+                    segment_key,
+                    len(in_edges),
+                    "with",
+                    len(left),
+                    len(right),
+                )
+                if len(in_edges) == 1:
+                    in_edge = in_edges[0]
+                    sub_left, left = split_by_first_false(left)
+                    sub_right, right = split_by_first_false(right)
+                    print("\tleft", len(sub_left), len(left))
+                    print("\tright", len(sub_right), len(right))
+                    if in_edge in edge_profiles:
+                        in_left, in_right = edge_profiles[in_edge]
+                        in_left.extend(sub_left)
+                        in_right.extend(sub_right)
+                        edge_profiles[in_edge] = (in_left, in_right)
+                    else:
+                        edge_profiles[in_edge] = (sub_left, sub_right)
+                    if (len(left) > 0) & (len(right) > 0):
+                        edge_profiles[graph_edge] = (left, right)
+                    else:
+                        edge_profiles.pop(graph_edge)
+            if (len(left) > 0) & (len(right) > 0):
+                if (left[-1][1] is True) & (right[-1][1] is True):
+                    out_edges = list(directed_graph.out_edges(graph_edge[1]))
                     print(
-                        "shared at start",
+                        "shared at end",
                         segment_key,
-                        len(in_edges),
+                        len(out_edges),
                         "with",
                         len(left),
                         len(right),
                     )
-                    if len(in_edges) == 1:
-                        in_edge = in_edges[0]
-                        sub_left, left = split_by_first_false(left)
-                        sub_right, right = split_by_first_false(right)
+                    if len(out_edges) == 1:
+                        out_edge = out_edges[0]
+                        sub_left, left = split_by_first_false(left, reverse=True)
+                        sub_right, right = split_by_first_false(right, reverse=True)
                         print("\tleft", len(sub_left), len(left))
                         print("\tright", len(sub_right), len(right))
-                        if in_edge in edge_profiles:
-                            in_left, in_right = edge_profiles[in_edge]
-                            in_left.extend(sub_left)
-                            in_right.extend(sub_right)
-                            edge_profiles[in_edge] = (in_left, in_right)
+                        if out_edge in edge_profiles:
+                            out_left, out_right = edge_profiles[out_edge]
+                            sub_left.extend(out_left)
+                            sub_right.extend(out_right)
+                            edge_profiles[out_edge] = (sub_left, sub_right)
                         else:
-                            edge_profiles[in_edge] = (sub_left, sub_right)
+                            edge_profiles[out_edge] = (sub_left, sub_right)
                         if (len(left) > 0) & (len(right) > 0):
                             edge_profiles[graph_edge] = (left, right)
                         else:
-                            edge_profiles.pop(graph_edge)
-                if (len(left) > 0) & (len(right) > 0):
-                    if (left[-1][1] is True) & (right[-1][1] is True):
-                        out_edges = list(directed_graph.out_edges(graph_edge[1]))
+                            if graph_edge in edge_profiles:
+                                edge_profiles.pop(graph_edge)
+    # remove edges without any profile
+    to_remove = []
+    for graph_edge in directed_graph.edges:
+        if graph_edge not in edge_profiles:
+            to_remove.append(graph_edge)
+    for graph_edge in to_remove:
+        directed_graph.remove_edge(*graph_edge)
+    print(len(directed_graph.edges), "edges after cleanup")
+    for graph_node in directed_graph.nodes:
+        in_edges = list(directed_graph.in_edges(graph_node))
+        out_edges = list(directed_graph.out_edges(graph_node))
+        if (len(in_edges) == 1) & (len(out_edges) == 1):
+            # make sur the last points of in_edge belong to out_edge
+            in_edge = in_edges[0]
+            if in_edge in edge_profiles:
+                in_left, in_right = edge_profiles[in_edge]
+                last_left = in_left[-1]
+                last_right = in_right[-1]
+                out_edge = out_edges[0]
+                if out_edge in edge_profiles:
+                    out_left, out_right = edge_profiles[out_edge]
+                    modif = False
+                    print("out_left", out_left)
+                    print("out_right", out_right)
+                    if last_left[0] != out_left[0][0]:
                         print(
-                            "shared at end",
-                            segment_key,
-                            len(out_edges),
-                            "with",
-                            len(left),
-                            len(right),
+                            "adding a left point",
+                            last_left[0],
+                            "before",
+                            out_left[0][0],
                         )
-                        if len(out_edges) == 1:
-                            out_edge = out_edges[0]
-                            sub_left, left = split_by_first_false(left, reverse=True)
-                            sub_right, right = split_by_first_false(right, reverse=True)
-                            print("\tleft", len(sub_left), len(left))
-                            print("\tright", len(sub_right), len(right))
-                            if out_edge in edge_profiles:
-                                out_left, out_right = edge_profiles[out_edge]
-                                sub_left.extend(out_left)
-                                sub_right.extend(out_right)
-                                edge_profiles[out_edge] = (sub_left, sub_right)
-                            else:
-                                edge_profiles[out_edge] = (sub_left, sub_right)
-                            if (len(left) > 0) & (len(right) > 0):
-                                edge_profiles[graph_edge] = (left, right)
-                            else:
-                                if graph_edge in edge_profiles:
-                                    edge_profiles.pop(graph_edge)
-        # remove edges without any profile
-        to_remove = []
-        for graph_edge in directed_graph.edges:
-            if graph_edge not in edge_profiles:
-                to_remove.append(graph_edge)
-        for graph_edge in to_remove:
-            directed_graph.remove_edge(*graph_edge)
-        print(len(directed_graph.edges), "edges after cleanup")
-        for graph_node in directed_graph.nodes:
-            in_edges = list(directed_graph.in_edges(graph_node))
-            out_edges = list(directed_graph.out_edges(graph_node))
-            if (len(in_edges) == 1) & (len(out_edges) == 1):
-                # make sur the last points of in_edge belong to out_edge
-                in_edge = in_edges[0]
-                if in_edge in edge_profiles:
-                    in_left, in_right = edge_profiles[in_edge]
-                    last_left = in_left[-1]
-                    last_right = in_right[-1]
-                    out_edge = out_edges[0]
-                    if out_edge in edge_profiles:
-                        out_left, out_right = edge_profiles[out_edge]
-                        modif = False
-                        print("out_left", out_left)
-                        print("out_right", out_right)
-                        if last_left[0] != out_left[0][0]:
-                            print(
-                                "adding a left point",
-                                last_left[0],
-                                "before",
-                                out_left[0][0],
-                            )
-                            out_left.insert(
-                                0, (last_left[0], False, None)
-                            )  # we don't keep bottleneck info
-                            modif = True
-                        if last_right[0] != out_right[0][0]:
-                            print(
-                                "adding a right point",
-                                last_right[0],
-                                "before",
-                                out_right[0][0],
-                            )
-                            out_right.insert(
-                                0, (last_right[0], False, None)
-                            )  # we don't keep bottleneck info
-                            modif = True
-                        if modif:
-                            edge_profiles[out_edge] = out_left, out_right
+                        out_left.insert(
+                            0, (last_left[0], False, None)
+                        )  # we don't keep bottleneck info
+                        modif = True
+                    if last_right[0] != out_right[0][0]:
+                        print(
+                            "adding a right point",
+                            last_right[0],
+                            "before",
+                            out_right[0][0],
+                        )
+                        out_right.insert(
+                            0, (last_right[0], False, None)
+                        )  # we don't keep bottleneck info
+                        modif = True
+                    if modif:
+                        edge_profiles[out_edge] = out_left, out_right
 
-        for edge_order, (edge, (left, right)) in enumerate(edge_profiles.items()):
-            attributes = directed_graph.get_edge_data(*edge)
-            segment_key = attributes["edge_key"]
-            segment_geometry = attributes["edge_geometry"]
-            merged_left = merge_profile_points(left)
-            merged_right = merge_profile_points(right)
+    for edge_order, (edge, (left, right)) in enumerate(edge_profiles.items()):
+        attributes = directed_graph.get_edge_data(*edge)
+        segment_key = attributes["edge_key"]
+        segment_geometry = attributes["edge_geometry"]
+        merged_left = merge_profile_points(left)
+        merged_right = merge_profile_points(right)
 
-            def add_points(profile, position):
-                for i, p in enumerate(profile):
-                    segment_order.append(edge_order)
-                    segment_id.append(segment_key)
-                    point_order.append(i)
-                    point_position.append(position)
-                    point_geom.append(Point(p[0]))
-                    point_bottlenecks.append(p[2])
+        def add_points(profile, position):
+            for i, p in enumerate(profile):
+                segment_order.append(edge_order)
+                segment_id.append(segment_key)
+                point_order.append(i)
+                point_position.append(position)
+                point_geom.append(Point(p[0]))
+                point_bottlenecks.append(p[2])
 
-            add_points(merged_left, "left")
-            add_points(merged_right, "right")
+        add_points(merged_left, "left")
+        add_points(merged_right, "right")
 
-        gdf_points = gpd.GeoDataFrame(
-            {
-                "point_id": list(range(0, len(point_geom))),
-                "segment_id": segment_id,
-                "segment_order": segment_order,
-                "point_order": point_order,
-                "point_position": point_position,
-                "point_bottlenecks": point_bottlenecks,
-            },
-            geometry=point_geom,
-            crs=surface.crs,
-        )
-        gdf_points.to_file(output_file, layer="points", driver="GPKG")
-        surface.to_file(output_file, layer="surface")
-        segment.to_file(output_file, layer="segment")
-        node.to_file(output_file, layer="node")
-        gdf_triangle.to_file(output_file, layer="triangle", driver="GPKG")
-        gdf_triangle_segment.to_file(
-            output_file, layer="triangle_segment", driver="GPKG"
-        )
-        gdf_nodes.to_file(output_file, layer="graph_node")
+    gdf_points = gpd.GeoDataFrame(
+        {
+            "point_id": list(range(0, len(point_geom))),
+            "segment_id": segment_id,
+            "segment_order": segment_order,
+            "point_order": point_order,
+            "point_position": point_position,
+            "point_bottlenecks": point_bottlenecks,
+        },
+        geometry=point_geom,
+        crs=surface.crs,
+    )
+    gdf_points.to_file(output_file, layer="points", driver="GPKG")
+    surface.to_file(output_file, layer="surface")
+    segment.to_file(output_file, layer="segment")
+    node.to_file(output_file, layer="node")
+    gdf_triangle.to_file(output_file, layer="triangle", driver="GPKG")
+    gdf_triangle_segment.to_file(
+        output_file, layer="triangle_segment", driver="GPKG"
+    )
+    gdf_nodes.to_file(output_file, layer="graph_node")
     print("All done!")
-
 
 if __name__ == "__main__":
     main()

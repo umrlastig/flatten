@@ -94,10 +94,10 @@ def export(
     # thefile.close()
 
 
-input = "temp.gpkg"
-triangle_layer = "triangle"
+input = "triangle_graph.gpkg"
+triangle_layer = "triangle_split"
 output_range_x = 10000.0
-z_rescale = 10.0
+z_rescale = 100.0
 triangles = gpd.read_file(input, layer=triangle_layer)
 
 unique_points: gpd.GeoSeries = triangles.geometry.extract_unique_points()
