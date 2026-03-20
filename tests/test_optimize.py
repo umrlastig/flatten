@@ -44,6 +44,7 @@ def test_unique():
     points['unique_id'] = points.groupby('geometry', sort=False).ngroup()
     unique_points = points.drop_duplicates(subset=['geometry'], keep='first')
     assert list(unique_points['unique_id']) == list(range(0, len(unique_points)))
+    assert len(unique_points) == 14
     print(points)
     print(unique_points)
     res = optimize_all_segments(points, alpha=1, beta=10, gamma=0.1)
@@ -52,4 +53,3 @@ def test_unique():
         points_final = res
         print(points_final)
         points_final.to_file(test_file, layer='final')
-        # assert(False)

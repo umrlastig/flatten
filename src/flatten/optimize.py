@@ -279,6 +279,7 @@ def optimize_all_segments(
 
         # Reconstruct geometries
         points['geometry'] = [Point(x, y, z) for x, y, z in zip(xs, ys, zs_new)] # type: ignore
+        verify_smoothness(z_opt, consecutive_points)
         return points
 
     else:
@@ -293,6 +294,24 @@ def optimize_all_segments(
         # logger.debug(f"z_opt = {z_opt}")
         # if (z_opt is None):
         return None
+
+def verify_smoothness(z_vals, consecutive_points):
+    """Verify the matrix formulation matches the loop version"""
+    # Loop version
+    loop_sum = 0
+    for consecutive in consecutive_points:
+        if len(consecutive) < 3:
+            continue
+        for idx in range(len(consecutive) - 2):
+            i, j, k = consecutive[idx], consecutive[idx+1], consecutive[idx+2]
+            loop_sum += (z_vals[i] - 2*z_vals[j] + z_vals[k])**2
+    
+    # Matrix version
+    D = build_second_difference_matrix(len(z_vals), consecutive_points)
+    matrix_sum = np.sum((D @ z_vals)**2)
+    
+    assert abs(loop_sum - matrix_sum) < 1e-6, "Formulations don't match!"
+    print(f"Smoothness terms match: {loop_sum:.6f}")
 
 def modify_heights(
     points: gpd.GeoDataFrame, segments: gpd.GeoDataFrame, heights: list[float]
