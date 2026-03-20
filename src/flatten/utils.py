@@ -157,8 +157,8 @@ def split_triangle(triangle: Polygon, line_segment: LineString):
     # projection_with_z = (projection[0], projection[1], coords[k])
     tri1_coords = [projection_with_z, coords[i], coords[k]]
     tri2_coords = [projection_with_z, coords[j], coords[i]]
-    print("tri1_coords",tri1_coords)
-    print("tri2_coords",tri2_coords)
+    # print("tri1_coords",tri1_coords)
+    # print("tri2_coords",tri2_coords)
     return [Polygon(tri1_coords), Polygon(tri2_coords)]
 
     # return split(triangle, line_segment).geoms
@@ -177,7 +177,7 @@ def split_triangles_with_bottlenecks(triangles_gdf, bottlenecks_gdf):
         triangle_geom = triangle_row.geometry
         # Check if this triangle has a bottleneck
         if triangle_id in bottleneck_lookup:
-            print("split_triangles_with_bottlenecks = ",triangle_id)
+            # print("split_triangles_with_bottlenecks = ",triangle_id)
             line_segment = bottleneck_lookup[triangle_id]
             
             # Split the triangle at the bottleneck geom
