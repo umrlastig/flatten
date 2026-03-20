@@ -93,7 +93,9 @@ def get_sources_and_targets(segment: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     )
 
 
-def get_triangles_with_height(union, crs, sample_points, elevations) -> gpd.GeoDataFrame:
+def get_triangles_with_height(
+    union, crs, sample_points, elevations
+) -> gpd.GeoDataFrame:
     triangles = shapely.constrained_delaunay_triangles(union)
 
     def triangle_height(geom: shapely.Polygon) -> float:
@@ -131,7 +133,9 @@ def get_triangles_with_height(union, crs, sample_points, elevations) -> gpd.GeoD
     return gdf_triangle
 
 
-def get_graph(surfaces: gpd.GeoDataFrame, max_segment_length: float) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]:
+def get_graph(
+    surfaces: gpd.GeoDataFrame, max_segment_length: float
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]:
     # union = shapely.union_all(surfaces.geometry).simplify(0.1, preserve_topology=True)
     union = shapely.union_all(surfaces.geometry).segmentize(max_segment_length)
     # sample points
@@ -146,7 +150,9 @@ def get_graph(surfaces: gpd.GeoDataFrame, max_segment_length: float) -> tuple[gp
     elevations = throttle_requests(list(transformer.itransform(sample_points)))
     assert len(elevations) == len(sample_points)
 
-    gdf_triangle = get_triangles_with_height(union, surfaces.crs, sample_points, elevations)
+    gdf_triangle = get_triangles_with_height(
+        union, surfaces.crs, sample_points, elevations
+    )
     # triangle_graph: gpd.GeoDataFrame = get_triangle_graph(gdf_triangle)
     # triangle_graph = neatnet.remove_interstitial_nodes(triangle_graph) # type: ignore
     # print("triangle_graph",len(triangle_graph))
@@ -175,6 +181,7 @@ def get_graph(surfaces: gpd.GeoDataFrame, max_segment_length: float) -> tuple[gp
     gdf_bottlenecks = get_bottlenecks(gdf_triangle, gdf_triangle_segment)
 
     gdf_split = split_triangles_with_bottlenecks(gdf_triangle, gdf_bottlenecks)
+
     def add_height(row) -> Optional[LineString]:
         line = row["geometry"]
         if not line:
@@ -287,9 +294,7 @@ def main():
     gdf_nodes = get_sources_and_targets(segment)
     gdf_triangle, gdf_triangle_segment, split = get_graph(surface, 20.0)
     # keep only the unconstrained segments
-    unconstrained_triangle_segment = gdf_triangle_segment.query(
-        'type != "constrained"'
-    )
+    unconstrained_triangle_segment = gdf_triangle_segment.query('type != "constrained"')
     # intersect them with the hydro segments
     res_intersection = unconstrained_triangle_segment.overlay(
         segment, how="intersection", keep_geom_type=False
@@ -493,11 +498,10 @@ def main():
     segment.to_file(output_file, layer="segment")
     node.to_file(output_file, layer="node")
     gdf_triangle.to_file(output_file, layer="triangle", driver="GPKG")
-    gdf_triangle_segment.to_file(
-        output_file, layer="triangle_segment", driver="GPKG"
-    )
+    gdf_triangle_segment.to_file(output_file, layer="triangle_segment", driver="GPKG")
     gdf_nodes.to_file(output_file, layer="graph_node")
     print("All done!")
+
 
 if __name__ == "__main__":
     main()

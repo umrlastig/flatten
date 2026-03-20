@@ -11,13 +11,15 @@ import shapely
 import networkx as nx
 
 from flatten.get_data import get_graph
-from flatten.optimize import optimize, optimize_all_segments
+from flatten.optimize import optimize_all_segments
 from flatten.orient_triangle_graph import get_oriented_graph
 from flatten.triangle_graph import remove_interstitial_nodes, reverse
 from flatten.wfs import get_hydro_data
 
 import logging
+
 logger = logging.getLogger(__name__)
+
 
 def get_profiles(
     gdf_segments: gpd.GeoDataFrame, line: LineString, direct: bool = True
@@ -43,9 +45,7 @@ def get_profiles(
         intersecting_segments_type,
     )
 
-    def is_not_on_one_end(
-        point: Point, segment: LineString, _: str
-    ) -> bool:
+    def is_not_on_one_end(point: Point, segment: LineString, _: str) -> bool:
         """
         True in the intersection is a point and it is not one of the endpoints of the segment.
         """
@@ -67,22 +67,22 @@ def get_profiles(
         intersecting_segments_type,
     ) = zip(*intersection_zipped)
     # zip again with distance
-    zipped: tuple[list[LineString], list[str], list[Point], list[float]] = (
-        zip(
-            intersecting_segments_geometry,
-            intersecting_segments_type,
-            intersections,
-            distances,
-        )
+    zipped: tuple[list[LineString], list[str], list[Point], list[float]] = zip(
+        intersecting_segments_geometry,
+        intersecting_segments_type,
+        intersections,
+        distances,
     )  # type: ignore
     # sort by distance
     sorted_intersections = sorted(
         zipped, key=lambda intersection: intersection[3], reverse=not direct
     )
 
-    def two_d_point(p) -> tuple[float,float]:
-        return tuple(shapely.get_coordinates(p,include_z=False).tolist()[0])
+    def two_d_point(p) -> tuple[float, float]:
+        return tuple(shapely.get_coordinates(p, include_z=False).tolist()[0])
+
     point: Point = Point(line.coords[0] if direct else line.coords[-1])
+
     def update(x, y: tuple[LineString, str, Point, float]):
         # the accumulator x: (the previous point, the index of the current bottleneck, left accumulator, right accumulator)
         previous, index, left, right = x
@@ -94,7 +94,9 @@ def get_profiles(
         # logger.debug(f"is_bottleneck={is_bottleneck}")
         # logger.debug(f"edge_index={edge_index}")
         # logger.debug(f"ring={[two_d_point(previous), two_d_point(intersection), two_d_point(segment)]}")
-        if LinearRing([two_d_point(previous), two_d_point(intersection), two_d_point(segment)]).is_ccw:
+        if LinearRing(
+            [two_d_point(previous), two_d_point(intersection), two_d_point(segment)]
+        ).is_ccw:
             left.append((segment.coords[0], edge_index))
             right.append((segment.coords[1], edge_index))
         else:
@@ -104,6 +106,8 @@ def get_profiles(
 
     _, _, left, right = reduce(update, sorted_intersections, (point, 0, [], []))  # type: ignore
     return left, right
+
+
 def merge_profile_points(
     points: list[tuple[tuple[float, float], int | None]],
 ) -> list[tuple[tuple[float, float], list[int]]]:
@@ -122,7 +126,13 @@ def merge_profile_points(
 
     return [build(key, list(g)) for key, g in groupby(points, key=lambda l: l[0])]
 
-def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length: float, output_file: str | None) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame] | None:
+
+def main(
+    srs: str,
+    in_box: tuple[float, float, float, float],
+    max_segment_length: float,
+    output_file: str | None,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame] | None:
     logger.info(f"{datetime.now()} - start")
     box = (in_box[0], in_box[1], in_box[2], in_box[3], srs)
     r = get_hydro_data(box, srs)
@@ -131,7 +141,9 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
         return None
     (surfaces, segments, _) = r
     # triangles = get_triangles(surfaces, max_segment_length)
-    gdf_triangle, gdf_triangle_segment, gdf_split = get_graph(surfaces, max_segment_length)
+    gdf_triangle, gdf_triangle_segment, gdf_split = get_graph(
+        surfaces, max_segment_length
+    )
 
     graph, edge_gdf, has_no_cycle = get_oriented_graph(gdf_triangle, segments)
 
@@ -139,12 +151,16 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
         logger.debug(f"Cycle: {cycle}")
     if output_file is not None:
         edge_gdf.to_file(output_file, layer="edges")
-    assert(has_no_cycle) # make sure there is no cycle
+    assert has_no_cycle  # make sure there is no cycle
 
     # simplify graph by removing simple nodes (1 incoming edge, 1 outgoing edge)
     graph = remove_interstitial_nodes(graph)
     line_graph = nx.line_graph(graph)
-    sorted_edges = list(nx.lexicographical_topological_sort(line_graph, key=lambda x: line_graph.out_degree(x)))
+    sorted_edges = list(
+        nx.lexicographical_topological_sort(
+            line_graph, key=lambda x: line_graph.out_degree(x)
+        )
+    )
     graph = reverse(graph)
     sorted_edges.reverse()
     sorted_edges = [(v, u, k) for (u, v, k) in sorted_edges]
@@ -172,7 +188,7 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
         if profiles:
             left, right = profiles
             edge_profiles[edge] = (left, right)
-    
+
     print(len(graph.edges), "edges")
     # remove edges without any profile
     to_remove = []
@@ -227,10 +243,14 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
                         modif = False
                         # logger.debug(f"{in_edge} with {in_left[0][0]} and {in_right[0][0]} and {len(in_left)} {len(in_right)}")
                         if first_left[0] != in_left[0][0]:
-                            in_left.append((first_left[0], None))  # we don't keep bottleneck info
+                            in_left.append(
+                                (first_left[0], None)
+                            )  # we don't keep bottleneck info
                             modif = True
                         if first_right[0] != in_right[0][0]:
-                            in_right.append((first_right[0], None))  # we don't keep bottleneck info
+                            in_right.append(
+                                (first_right[0], None)
+                            )  # we don't keep bottleneck info
                             modif = True
                         if modif:
                             # logger.debug(f"modif {len(in_left)} {len(in_right)}")
@@ -304,15 +324,16 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
     logger.info(f"{datetime.now()} - all done!")
     return gdf_points, gdf_split
 
+
 def optimal_triangle_height(p1: Point, p2: Point, p3: Point) -> Point:
     """
     Calculate optimal p3 to make triangle as horizontal as possible.
-    
+
     Args:
         p1: (x1, y1, z1) - first point (fixed)
         p2: (x2, y2, z2) - second point (fixed)
         p3: (x3, y3, z3) - third point (optimal z3 will be calculated)
-    
+
     Returns:
         p3: third point with optimal height
     """
@@ -324,6 +345,7 @@ def optimal_triangle_height(p1: Point, p2: Point, p3: Point) -> Point:
     # Optimal z3
     z3 = p1.z + dz12 * np.dot(v12, v13) / np.dot(v12, v12)
     return Point(p3.x, p3.y, z3)
+
 
 if __name__ == "__main__":
     logger.setLevel("DEBUG")
@@ -356,28 +378,30 @@ if __name__ == "__main__":
                         # logger.debug(f"coord_index not found = {coord_index}")
                         missing_indices.append(coord_index)
                         triangle_indices.append(-1)
-                if (len(missing_indices) == 0):
-                    new_triangle["geometry"] = Polygon([
-                        points.geometry.iat[triangle_indices[0]], # type: ignore
-                        points.geometry.iat[triangle_indices[1]], # type: ignore
-                        points.geometry.iat[triangle_indices[2]], # type: ignore
-                        points.geometry.iat[triangle_indices[0]], # type: ignore
-                    ])
+                if len(missing_indices) == 0:
+                    new_triangle["geometry"] = Polygon(
+                        [
+                            points.geometry.iat[triangle_indices[0]],  # type: ignore
+                            points.geometry.iat[triangle_indices[1]],  # type: ignore
+                            points.geometry.iat[triangle_indices[2]],  # type: ignore
+                            points.geometry.iat[triangle_indices[0]],  # type: ignore
+                        ]
+                    )
                     final_triangles.append(new_triangle)
-                elif (len(missing_indices) == 1):
+                elif len(missing_indices) == 1:
                     missing_index = missing_indices[0]
                     # logger.debug(f"missing_index = {missing_index}")
                     # there is one point missing, let's guess its height
-                    index_1 = triangle_indices[(missing_index-1)%4]
-                    index_2 = triangle_indices[(missing_index+1)%4]
+                    index_1 = triangle_indices[(missing_index - 1) % 4]
+                    index_2 = triangle_indices[(missing_index + 1) % 4]
                     # logger.debug(f"index_1 = {index_1} index_2 = {index_2}")
-                    p1: Point = points.geometry.iat[index_1] # type: ignore
-                    p2: Point = points.geometry.iat[index_2] # type: ignore
+                    p1: Point = points.geometry.iat[index_1]  # type: ignore
+                    p2: Point = points.geometry.iat[index_2]  # type: ignore
                     p3 = Point(coords[missing_index])
                     # logger.debug(f"p1 = {p1} p2 = {p2} p3 = {p3}")
                     p3_opt = optimal_triangle_height(p1, p2, p3)
                     # logger.debug(f"p3'={p3_opt}")
-                    new_triangle["geometry"] = Polygon([p1,p2,p3_opt,p1])
+                    new_triangle["geometry"] = Polygon([p1, p2, p3_opt, p1])
                     final_triangles.append(new_triangle)
             final_triangles_gdf = gpd.GeoDataFrame(final_triangles, crs=points.crs)
             final_triangles_gdf.to_file(output_file, layer="triangles_optimised")

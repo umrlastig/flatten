@@ -105,7 +105,9 @@ unique_points: gpd.GeoSeries = unique_points.explode(ignore_index=True)
 unique_points: gpd.GeoSeries = unique_points.drop_duplicates().reset_index(drop=True)  # type: ignore
 point_layer = "points_optimised"
 print(point_layer)
-export(unique_points, triangles.geometry, f"{point_layer}.obj", output_range_x, z_rescale)
+export(
+    unique_points, triangles.geometry, f"{point_layer}.obj", output_range_x, z_rescale
+)
 point_layer = f"{point_layer}_no_rescaling"
 print(point_layer)
 export(unique_points, triangles.geometry, f"{point_layer}.obj", rescale=False)

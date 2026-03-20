@@ -1,14 +1,41 @@
 import pytest
 from shapely import Point, Polygon, LineString
 from flatten.utils import (
+    get_triangles,
     find_projection,
     get_bottlenecks,
     split_by_first_false,
     merge_profile_points,
     get_profiles,
     split_triangles_with_bottlenecks,
+    find_point_index_in_triangle,
 )
 import geopandas as gpd
+
+
+def test_get_triangles():
+    polygon = Polygon(((0.0, 0.0), (0.0, 2.0), (2.0, 2.0), (2.0, 0.0), (0.0, 0.0)))
+    surfaces = gpd.GeoDataFrame(
+        {"polygon_id": [0], "geometry": [polygon]},
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+    triangles = get_triangles(surfaces, max_segment_length=1)
+    print(triangles)
+    assert len(triangles) == 6
+
+
+def test_find_point_index_in_triangle():
+    triangle = Polygon(((0.0, 0.0), (0.0, 2.0), (1.0, 2.0), (0.0, 0.0)))
+    index = find_point_index_in_triangle(triangle.exterior.coords, Point((0.0, 0.0)))
+    print(index)
+    assert index == 0
+    index = find_point_index_in_triangle(triangle.exterior.coords, Point((1.0, 2.0)))
+    print(index)
+    assert index == 2
+    index = find_point_index_in_triangle(triangle.exterior.coords, Point((1.0, 1.0)))
+    print(index)
+    assert index == -1
 
 
 def test_projection():
@@ -144,26 +171,33 @@ def test_get_profiles():
     profiles = get_profiles(segments, l2)  # type: ignore
     assert profiles is None
 
+
 def test_split():
     # Create sample triangles
     triangles_data = [
-        {'triangle_id': 1, 'geometry': Polygon([(0, 0, 10), (2, 0, 20), (1, 2, 30)])},
-        {'triangle_id': 2, 'geometry': Polygon([(2, 0, 20), (4, 0, 30), (3, 2, 10)])},
-        {'triangle_id': 3, 'geometry': Polygon([(1, 2, 30), (3, 2, 10), (2, 4, 40)])}
+        {"triangle_id": 1, "geometry": Polygon([(0, 0, 10), (2, 0, 20), (1, 2, 30)])},
+        {"triangle_id": 2, "geometry": Polygon([(2, 0, 20), (4, 0, 30), (3, 2, 10)])},
+        {"triangle_id": 3, "geometry": Polygon([(1, 2, 30), (3, 2, 10), (2, 4, 40)])},
     ]
     triangles_gdf = gpd.GeoDataFrame(triangles_data, crs="EPSG:4326")
-    
+
     # Create sample bottlenecks (points on edges)
     bottlenecks_data = [
-        {'triangle_id': 1, 'geometry': LineString([(1, 0, 15), (1, 2, 30)])},  # On bottom edge of triangle 1
-        {'triangle_id': 2, 'geometry': LineString([(3, 0, 25), (3, 2, 10)])}   # On bottom edge of triangle 2
+        {
+            "triangle_id": 1,
+            "geometry": LineString([(1, 0, 15), (1, 2, 30)]),
+        },  # On bottom edge of triangle 1
+        {
+            "triangle_id": 2,
+            "geometry": LineString([(3, 0, 25), (3, 2, 10)]),
+        },  # On bottom edge of triangle 2
         # Triangle 3 has no bottleneck
     ]
     bottlenecks_gdf = gpd.GeoDataFrame(bottlenecks_data, crs="EPSG:4326")
-    
+
     # Perform the split
     result_gdf = split_triangles_with_bottlenecks(triangles_gdf, bottlenecks_gdf)
-    
+
     print(f"Original triangles: {len(triangles_gdf)}")
     print(f"Resulting triangles: {len(result_gdf)}")
     print("\nResulting geometries:")
@@ -171,4 +205,4 @@ def test_split():
         print(f"Triangle ID {row['triangle_id']}: {row.geometry}")
     assert len(triangles_gdf) == 3
     assert len(result_gdf) == 5
-    #TODO better tests?
+    # TODO better tests?

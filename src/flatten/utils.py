@@ -1,10 +1,18 @@
 from itertools import groupby, takewhile
 from typing import Any, Optional, Union
 import shapely
-from shapely import LinearRing, Point, LineString, Polygon, constrained_delaunay_triangles, union_all
+from shapely import (
+    LinearRing,
+    Point,
+    LineString,
+    Polygon,
+    constrained_delaunay_triangles,
+    union_all,
+)
 from shapely.ops import split
 import geopandas as gpd
 from functools import reduce
+
 
 def find_projection(
     triangle: shapely.Polygon, segment: shapely.LineString
@@ -111,13 +119,17 @@ def get_bottlenecks(
     result = eligible_with_seg[[id_col, "geometry"]].copy()
     return result.dropna(subset=["geometry"])
 
+
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point, LineString, Polygon
 from shapely.ops import split
 import numpy as np
 
-def get_triangles(surfaces: gpd.GeoDataFrame, max_segment_length: float) -> gpd.GeoDataFrame:
+
+def get_triangles(
+    surfaces: gpd.GeoDataFrame, max_segment_length: float
+) -> gpd.GeoDataFrame:
     # union = union_all(surfaces.geometry).simplify(0.1, preserve_topology=True)
     union = union_all(surfaces.geometry).segmentize(max_segment_length)
     triangles = constrained_delaunay_triangles(union)
@@ -132,6 +144,7 @@ def get_triangles(surfaces: gpd.GeoDataFrame, max_segment_length: float) -> gpd.
         crs=surfaces.crs,
     )
 
+
 def find_point_index_in_triangle(coords, point: Point, tolerance: float = 1e-6) -> int:
     """
     Find the index of a vertex in a triangle that matches the given point.
@@ -142,9 +155,10 @@ def find_point_index_in_triangle(coords, point: Point, tolerance: float = 1e-6) 
             return i
     return -1  # No match found
 
+
 def split_triangle(triangle: Polygon, line_segment: LineString):
     projection = line_segment.coords[0]
-    triangle_point  = line_segment.coords[1]
+    triangle_point = line_segment.coords[1]
     coords = list(triangle.exterior.coords[:-1])  # Exclude closing duplicate
     i = find_point_index_in_triangle(coords, Point(triangle_point))
     j = (i + 1) % 3
@@ -152,8 +166,8 @@ def split_triangle(triangle: Polygon, line_segment: LineString):
     segment = LineString([coords[j], coords[k]])
     dist = segment.project(Point(projection), normalized=True)
     projection_with_z: list[float] = shapely.get_coordinates(
-            segment.interpolate(dist, normalized=True),include_z=True
-        ).tolist()[0]
+        segment.interpolate(dist, normalized=True), include_z=True
+    ).tolist()[0]
     # projection_with_z = (projection[0], projection[1], coords[k])
     tri1_coords = [projection_with_z, coords[i], coords[k]]
     tri2_coords = [projection_with_z, coords[j], coords[i]]
@@ -163,15 +177,15 @@ def split_triangle(triangle: Polygon, line_segment: LineString):
 
     # return split(triangle, line_segment).geoms
 
+
 def split_triangles_with_bottlenecks(triangles_gdf, bottlenecks_gdf):
     """
     Split triangles at specified bottleneck points.
     """
-    result_rows = []        
-    bottleneck_lookup = dict(zip(
-        bottlenecks_gdf['triangle_id'],
-        bottlenecks_gdf.geometry
-    ))
+    result_rows = []
+    bottleneck_lookup = dict(
+        zip(bottlenecks_gdf["triangle_id"], bottlenecks_gdf.geometry)
+    )
     for _, triangle_row in triangles_gdf.iterrows():
         triangle_id = triangle_row["triangle_id"]
         triangle_geom = triangle_row.geometry
@@ -179,20 +193,21 @@ def split_triangles_with_bottlenecks(triangles_gdf, bottlenecks_gdf):
         if triangle_id in bottleneck_lookup:
             # print("split_triangles_with_bottlenecks = ",triangle_id)
             line_segment = bottleneck_lookup[triangle_id]
-            
+
             # Split the triangle at the bottleneck geom
             split_result = split_triangle(triangle_geom, line_segment)
-            
+
             # Add all resulting triangles with original attributes
             for tri_geom in split_result:
                 new_row = triangle_row.copy()
-                new_row['geometry'] = tri_geom
+                new_row["geometry"] = tri_geom
                 result_rows.append(new_row)
         else:
             # No bottlenecks for this triangle, keep as is
             result_rows.append(triangle_row)
-    
+
     return gpd.GeoDataFrame(result_rows, crs=triangles_gdf.crs)
+
 
 def get_profiles(
     gdf_segments: gpd.GeoDataFrame, line: LineString, direct: bool = True

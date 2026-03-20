@@ -15,33 +15,6 @@ logger.setLevel("DEBUG")
 logger.addHandler(logging.StreamHandler())
 
 
-def split_cycle_on_change(
-    cycle: List[Any], shared_nodes: Set[Any]
-) -> List[Tuple[List[Any], bool]]:
-    """Return maximal consecutive shared / unshared segments of a circular list."""
-    if not cycle:  # empty input: nothing to split
-        return []
-    n = len(cycle)
-
-    def is_shared(node: Any) -> bool:
-        """Whether a node belongs to the shared set."""
-        return node in shared_nodes
-
-    # Find a transition point (where the flag changes)
-    start = 0
-    for i in range(n):
-        if is_shared(cycle[i]) != is_shared(cycle[(i + 1) % n]):
-            start = (i + 1) % n
-            break
-    else:  # no change at all: return a single segment/path
-        return [(cycle[:], is_shared(cycle[0]))]
-    # shift the cycle starting at `start`.
-    shifted = [cycle[(start + i) % n] for i in range(n)]
-    # group consecutive shared / not shared nodes
-    groups = [(list(g), flag) for flag, g in groupby(shifted, key=is_shared)]
-    return groups
-
-
 def cycle_sublist(cycle: List[Any], start: int, end: int) -> List[Any]:
     """Create a sublist of cycle from `start` to `end` (included)."""
     n = len(cycle)
@@ -58,10 +31,13 @@ def split_cycle(cycle: List[Any], split_nodes: Set[Any]) -> List[List[Any]]:
 
 
 def add_path(G: nx.MultiDiGraph, sub_path: List[Any], reverse: bool):
+    """Add the path (a list of nodes) to the graph. Reverse it if `reverse`."""
     if reverse:
         sub_path.reverse()
     for i in range(len(sub_path) - 1):
-        if (not G.has_edge(sub_path[i], sub_path[i + 1])) & (not G.has_edge(sub_path[i + 1], sub_path[i])):
+        if (not G.has_edge(sub_path[i], sub_path[i + 1])) & (
+            not G.has_edge(sub_path[i + 1], sub_path[i])
+        ):
             G.add_edge(
                 sub_path[i],
                 sub_path[i + 1],
@@ -74,13 +50,19 @@ def add_path(G: nx.MultiDiGraph, sub_path: List[Any], reverse: bool):
                 ),
             )
 
-def get_nodes_accessible_from(G: nx.MultiDiGraph, node: Any, cycle_nodes: Set[Any]) -> int:
+
+def get_nodes_accessible_from(
+    G: nx.MultiDiGraph, node: Any, cycle_nodes: Set[Any]
+) -> int:
     """Get the number of nodes accessible from `node` outside of the cycle"""
     if len(set(G.successors(node)).difference(cycle_nodes)) == 0:
         return 0
     return len(descendants(G, node).difference(cycle_nodes))
 
-def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataFrame) -> tuple[nx.MultiDiGraph, gpd.GeoDataFrame, bool]:
+
+def get_oriented_graph(
+    gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataFrame
+) -> tuple[nx.MultiDiGraph, gpd.GeoDataFrame, bool]:
     """
     Create an oriented multi graph from the the hydrographic segments and the surfaces.
     """
@@ -94,6 +76,7 @@ def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataF
         gdf_segment[["cleabs", "geometry", "_edge_idx"]],
         gdf_triangle[["triangle_id", "geometry"]],
         how="intersection",
+        keep_geom_type=True,
     )
 
     def fragment_position(row):
@@ -118,13 +101,11 @@ def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataF
         .reset_index(name="tri_sequence")
     )
     G = nx.MultiDiGraph()
-
     # Add all triangle IDs as nodes (optional – NetworkX will auto‑add them)
     G.add_nodes_from(gdf_triangle["triangle_id"])
     # attach geometry of each triangle as node attribute
     tri_geom_dict = dict(zip(gdf_triangle["triangle_id"], gdf_triangle["geometry"]))
     nx.set_node_attributes(G, tri_geom_dict, name="geometry")
-
     # Iterate over each edge’s ordered triangle list
     for _, row in tri_lists.iterrows():
         edge_id = row["cleabs"]
@@ -150,24 +131,15 @@ def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataF
                             [src_geometry.centroid, dst_geometry.centroid]
                         ),
                     )
-
     logger.info(f"Number of triangle nodes: {G.number_of_nodes()}")
     logger.info(f"Number of directed arcs : {G.number_of_edges()}")
-
     # find the cycles in the triangle graph and connect them to the directed graph
     connected_nodes = set(filter(lambda n: len(list(G.neighbors(n))) > 0, G.nodes()))
     triangle_graph_cycles = sorted(list(nx.simple_cycles(triangle_graph)), key=len)
     for cycle in triangle_graph_cycles:
         shared = set(cycle).intersection(connected_nodes)
-        # if len(shared) == len(cycle):
-        #     logger.debug(f"cycle complete: {cycle}")
-        # else:
         if len(shared) < len(cycle):
-            # if len(shared) == 0:
-            #     logger.debug(f"cycle without common node: {cycle}")
-            # else:
             if len(shared) > 0:
-                # logger.debug(f"cycle incomplete: {cycle}")
                 # we split at the points with 3 edges that belong to both graphs
                 split_nodes = set(
                     filter(lambda n: len(list(triangle_graph.neighbors(n))) > 2, cycle)
@@ -203,10 +175,6 @@ def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataF
             add_path(G, [start, end], True)
             connected_nodes.add(end)
 
-    # Show arcs with the originating edge(s)
-    # for u, v, data in G.edges(data=True):
-    #     logger.debug(f"{u} → {v}  (via edge(s): {data['edge_ids']})")
-
     records = []
     for u, v, data in G.edges(data=True):
         line = data["geometry"]
@@ -218,11 +186,11 @@ def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataF
                 "geometry": line,
             }
         )
-
     # Create the GeoDataFrame
     edge_gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=gdf_triangle.crs)
     cycles = list(nx.simple_cycles(G))
     return G, edge_gdf, len(cycles) == 0
+
 
 def main():
     srs = "urn:ogc:def:crs:EPSG::2154"
@@ -236,8 +204,9 @@ def main():
     triangles = get_triangles(surfaces, 20.0)
     _, edge_gdf, has_no_cycle = get_oriented_graph(triangles, gdf_segment)
     edge_gdf.to_file(output_file, layer="edges")
-    assert(has_no_cycle) # make sure there is no cycle
+    assert has_no_cycle  # make sure there is no cycle
     logger.debug("All done!")
+
 
 if __name__ == "__main__":
     logger.setLevel("DEBUG")
