@@ -95,7 +95,7 @@ def export(
 
 
 input = "triangle_graph.gpkg"
-triangle_layer = "triangle_split"
+triangle_layer = "triangles_optimised"
 output_range_x = 10000.0
 z_rescale = 100.0
 triangles = gpd.read_file(input, layer=triangle_layer)
@@ -103,19 +103,10 @@ triangles = gpd.read_file(input, layer=triangle_layer)
 unique_points: gpd.GeoSeries = triangles.geometry.extract_unique_points()
 unique_points: gpd.GeoSeries = unique_points.explode(ignore_index=True)
 unique_points: gpd.GeoSeries = unique_points.drop_duplicates().reset_index(drop=True)  # type: ignore
-print("original")
-export(unique_points, triangles.geometry, f"original.obj", output_range_x, z_rescale)
-point_layer = "points"
-points = gpd.read_file(input, layer=point_layer)
-point_geom: gpd.GeoSeries = points.geometry.drop_duplicates().reset_index(drop=True)  # type: ignore
-print(point_layer)
-export(point_geom, triangles.geometry, f"{point_layer}.obj", output_range_x, z_rescale)
 point_layer = "points_optimised"
-points = gpd.read_file(input, layer=point_layer)
-point_geom: gpd.GeoSeries = points.geometry.drop_duplicates().reset_index(drop=True)  # type: ignore
 print(point_layer)
-export(point_geom, triangles.geometry, f"{point_layer}.obj", output_range_x, z_rescale)
+export(unique_points, triangles.geometry, f"{point_layer}.obj", output_range_x, z_rescale)
 point_layer = f"{point_layer}_no_rescaling"
 print(point_layer)
-export(point_geom, triangles.geometry, f"{point_layer}.obj", rescale=False)
+export(unique_points, triangles.geometry, f"{point_layer}.obj", rescale=False)
 print("All done!")
