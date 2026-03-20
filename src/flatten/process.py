@@ -11,7 +11,7 @@ import shapely
 import networkx as nx
 
 from flatten.get_data import get_graph
-from flatten.optimize import optimize
+from flatten.optimize import optimize, optimize_all_segments
 from flatten.orient_triangle_graph import get_oriented_graph
 from flatten.triangle_graph import remove_interstitial_nodes, reverse
 from flatten.wfs import get_hydro_data
@@ -185,9 +185,7 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
     for graph_node in graph.nodes:
         in_edges = list(graph.in_edges(graph_node, keys=True))
         out_edges = list(graph.out_edges(graph_node, keys=True))
-        if (len(in_edges) == 1) & (len(out_edges) == 1):
-            # FIXME should allow for more complex situations but it creates unsolvable optimisations
-            # FIXME we should switch to a global optimisation!
+        if (len(in_edges) == 1) & (len(out_edges) >= 1):
             logger.debug(f"graph_node {graph_node} with {len(in_edges)} and {len(out_edges)}")
             # make sur the last points of in_edge belong to out_edge
             in_edge = in_edges[0]
@@ -196,7 +194,6 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
                 last_left = in_left[-1]
                 last_right = in_right[-1]
                 logger.debug(f"last_left={last_left} last_right={last_right}")
-                # out_edge = out_edges[0]
                 for out_edge in out_edges:
                     if out_edge in edge_profiles:
                         out_left, out_right = edge_profiles[out_edge]
@@ -215,6 +212,29 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
                         if modif:
                             logger.debug(f"modif {len(out_left)} {len(out_right)}")
                             edge_profiles[out_edge] = out_left, out_right
+        elif (len(in_edges) > 1) & (len(out_edges) == 1):
+            logger.debug(f"graph_node {graph_node} with {len(in_edges)} and {len(out_edges)}")
+            # make sur the first points of out_edge belong to out_edge
+            out_edge = out_edges[0]
+            if out_edge in edge_profiles:
+                out_left, out_right = edge_profiles[out_edge]
+                first_left = out_left[0]
+                first_right = out_right[0]
+                logger.debug(f"first_left={first_left} first_right={first_right}")
+                for in_edge in in_edges:
+                    if in_edge in edge_profiles:
+                        in_left, in_right = edge_profiles[in_edge]
+                        modif = False
+                        logger.debug(f"{in_edge} with {in_left[0][0]} and {in_right[0][0]} and {len(in_left)} {len(in_right)}")
+                        if first_left[0] != in_left[0][0]:
+                            in_left.append((first_left[0], None))  # we don't keep bottleneck info
+                            modif = True
+                        if first_right[0] != in_right[0][0]:
+                            in_right.append((first_right[0], None))  # we don't keep bottleneck info
+                            modif = True
+                        if modif:
+                            logger.debug(f"modif {len(in_left)} {len(in_right)}")
+                            edge_profiles[in_edge] = in_left, in_right
 
     for edge_order, (edge, (left, right)) in enumerate(edge_profiles.items()):
         attributes = graph.get_edge_data(*edge)
@@ -294,28 +314,29 @@ if __name__ == "__main__":
     res = main(srs, box, max_segment_length, output_file)
     if res is not None:
         points, triangles = res
-        points, _ = optimize(points)
-        points.to_file(output_file, layer="points_optimised")
-        final_triangles = []
-        for _, triangle in triangles.iterrows():
-            new_triangle = triangle.copy()
-            coords = triangle["geometry"].exterior.coords
-            triangle_indices = []
-            for coord in coords:
-                tol = 1e-9
-                mask = (np.abs(points.geometry.x - coord[0]) < tol) & (
-                    np.abs(points.geometry.y - coord[1]) < tol
-                )
-                matches = points.geometry[mask]
-                if any(matches):
-                    triangle_indices.append(matches.index[0])
-            if (len(triangle_indices) == 4):
-                new_triangle["geometry"] = Polygon([
-                    points.geometry.iat[triangle_indices[0]], # type: ignore
-                    points.geometry.iat[triangle_indices[1]], # type: ignore
-                    points.geometry.iat[triangle_indices[2]], # type: ignore
-                    points.geometry.iat[triangle_indices[0]], # type: ignore
-                ])
-                final_triangles.append(new_triangle)
-        final_triangles_gdf = gpd.GeoDataFrame(final_triangles, crs=points.crs)
-        final_triangles_gdf.to_file(output_file, layer="triangles_optimised")
+        points = optimize_all_segments(points)
+        if points is not None:
+            points.to_file(output_file, layer="points_optimised")
+            final_triangles = []
+            for _, triangle in triangles.iterrows():
+                new_triangle = triangle.copy()
+                coords = triangle["geometry"].exterior.coords
+                triangle_indices = []
+                for coord in coords:
+                    tol = 1e-9
+                    mask = (np.abs(points.geometry.x - coord[0]) < tol) & (
+                        np.abs(points.geometry.y - coord[1]) < tol
+                    )
+                    matches = points.geometry[mask]
+                    if any(matches):
+                        triangle_indices.append(matches.index[0])
+                if (len(triangle_indices) == 4):
+                    new_triangle["geometry"] = Polygon([
+                        points.geometry.iat[triangle_indices[0]], # type: ignore
+                        points.geometry.iat[triangle_indices[1]], # type: ignore
+                        points.geometry.iat[triangle_indices[2]], # type: ignore
+                        points.geometry.iat[triangle_indices[0]], # type: ignore
+                    ])
+                    final_triangles.append(new_triangle)
+            final_triangles_gdf = gpd.GeoDataFrame(final_triangles, crs=points.crs)
+            final_triangles_gdf.to_file(output_file, layer="triangles_optimised")

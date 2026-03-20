@@ -96,7 +96,7 @@ def optimize_segment(
     )  # fidelity to the original heights, right profile
     obj += beta * cp.sum(
         [cp.square(zL[i] - zR[j]) for i, j in pairs]
-    )  # pairwise consistency
+    )  # pairwise consistency (bottlenecks)
     if gamma > 0:
         # second‑difference smoothness
         obj += gamma * cp.sum_squares(zL[2:] - 2 * zL[1:-1] + zL[:-2])
@@ -152,6 +152,111 @@ def optimize_segment(
                     # print(key, "Found right", i, zR_opt[i]) # type: ignore
                     fixed_heights[key] = zR_opt[i]  # type: ignore
     return zL_opt, zR_opt
+
+def sliding_window_generator(lst, n=3):
+    for i in range(len(lst) - n + 1):
+        yield lst[i:i+n]
+
+def optimize_all_segments(
+    points: gpd.GeoDataFrame,
+    alpha: float = 1.0,
+    beta: float = 10.0,
+    gamma: float = 0.1,
+) -> gpd.GeoDataFrame | None:
+    """
+    Optimize all segments with segment_order.
+
+    :param alpha: weight of the fidelity to the original heights
+    :type alpha: float
+    :param beta: weight of the pairwise consistency
+    :type beta: float
+    :param gamma: weight of the smoothness (gamma > 0 activates smoothness)
+    :type gamma: float
+    """
+    points['unique_id'] = points.groupby('geometry', sort=False).ngroup()
+    unique_points = points.drop_duplicates(subset=['geometry'], keep='first')
+    assert list(unique_points['unique_id']) == list(range(0, len(unique_points)))
+
+    consecutive_points: list[list[int]] = []
+    pairs: list[tuple[int, int]] = []
+    segment_orders = sorted(set(points["segment_order"].tolist()))
+    for segment_order in segment_orders:
+        # print("segment_order",segment_order)
+        segment_left = points[
+            (points["segment_order"] == segment_order)
+            & (points["point_position"] == "left")
+        ].sort_values(by=["point_order"])
+        segment_right = points[
+            (points["segment_order"] == segment_order)
+            & (points["point_position"] == "right")
+        ].sort_values(by=["point_order"])
+        # print("left",segment_left["unique_id"].tolist())
+        # print("right",segment_right["unique_id"].tolist())
+        consecutive_points.append(segment_left["unique_id"].tolist())
+        consecutive_points.append(segment_right["unique_id"].tolist())
+        # handling bottlenecks
+        bottlenecks_left = segment_left["point_bottlenecks"].tolist()
+        bottlenecks_right = segment_right["point_bottlenecks"].tolist()
+        bottlenecks = sorted(set(list(chain.from_iterable(bottlenecks_left))))
+        for b in bottlenecks:
+            for i, b_l in enumerate(bottlenecks_left):
+                if b in b_l:
+                    left = segment_left.iloc[i]["unique_id"]
+            for i, r_l in enumerate(bottlenecks_right):
+                if b in r_l:
+                    right = segment_right.iloc[i]["unique_id"]
+            pairs.append((left, right))
+            # print("pair",left, right)
+
+    z0 = unique_points["geometry"].z # original heights
+    # Fixed‑height specifications (list of (index, height))
+    n = len(z0)
+    # variables
+    z = cp.Variable(n)
+    # objectives
+    obj = 0
+    # fidelity to the original heights
+    obj += alpha * cp.sum_squares(z - z0)
+    # pairwise consistency (bottlenecks)
+    obj += beta * cp.sum([cp.square(z[i] - z[j]) for i, j in pairs])
+    # print("consecutive_points")
+    # for consecutive in consecutive_points:
+    #     print(consecutive)
+    #     for i,j in sliding_window_generator(consecutive,2):
+    #         print(i,j)
+    if gamma > 0:
+        # second‑difference smoothness
+        for consecutive in consecutive_points:
+            obj += gamma * cp.sum([cp.square(z[i] - 2 * z[j] + z[k]) for i,j,k in sliding_window_generator(consecutive)])
+    # monotonicity constraints
+    constraints = []
+    for consecutive in consecutive_points:
+        constraints += [z[j] >= z[i] for i,j in sliding_window_generator(consecutive,2)]
+    # solve
+    prob = cp.Problem(cp.Minimize(obj), constraints)
+    res = prob.solve(solver=cp.OSQP, max_iter=100_000)        
+    # results
+    z_opt = z.value
+
+    if isinstance(res, float) and (math.isinf(res)):
+        logger.error(f"res = {res}")
+        logger.error(f"segment_order = {segment_left["segment_order"].tolist()[0]}")
+        logger.error(f"left = {segment_left["geometry"].tolist()}")
+        logger.error(f"right = {segment_right["geometry"].tolist()}")
+        logger.error(f"z0 = {z0.tolist()}")
+        logger.debug(f"z_opt = {z_opt}")
+    if (z_opt is None):
+        return None
+    
+    points['old_z'] = points['unique_id'].map(lambda x: z0.tolist()[x])
+    points['new_z'] = points['unique_id'].map(lambda x: z_opt.tolist()[x])
+    xs = points.geometry.x
+    ys = points.geometry.y
+    zs_new = points['new_z']
+
+    # Reconstruct geometries
+    points['geometry'] = [Point(x, y, z) for x, y, z in zip(xs, ys, zs_new)] # type: ignore
+    return points
 
 
 def modify_heights(

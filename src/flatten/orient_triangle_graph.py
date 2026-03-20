@@ -159,13 +159,15 @@ def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataF
     triangle_graph_cycles = sorted(list(nx.simple_cycles(triangle_graph)), key=len)
     for cycle in triangle_graph_cycles:
         shared = set(cycle).intersection(connected_nodes)
-        if len(shared) == len(cycle):
-            logger.debug(f"cycle complete: {cycle}")
-        else:
-            if len(shared) == 0:
-                logger.debug(f"cycle without common node: {cycle}")
-            else:
-                logger.debug(f"cycle incomplete: {cycle}")
+        # if len(shared) == len(cycle):
+        #     logger.debug(f"cycle complete: {cycle}")
+        # else:
+        if len(shared) < len(cycle):
+            # if len(shared) == 0:
+            #     logger.debug(f"cycle without common node: {cycle}")
+            # else:
+            if len(shared) > 0:
+                # logger.debug(f"cycle incomplete: {cycle}")
                 # we split at the points with 3 edges that belong to both graphs
                 split_nodes = set(
                     filter(lambda n: len(list(triangle_graph.neighbors(n))) > 2, cycle)
@@ -175,15 +177,15 @@ def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataF
                     sub_path_shared = set(sub_path).intersection(connected_nodes)
                     if len(sub_path_shared) < len(sub_path):
                         # there are unshared nodes
-                        logger.debug(f"sub_path: {sub_path}")
+                        # logger.debug(f"sub_path: {sub_path}")
                         start = sub_path[0]
                         # find out if start has successors outside the cycle
                         desc_start = get_nodes_accessible_from(G, start, set(cycle))
                         end = sub_path[-1]
                         # find out if end has successors outside the cycle
                         desc_end = get_nodes_accessible_from(G, end, set(cycle))
-                        logger.debug(f"start: {start} => {desc_start}")
-                        logger.debug(f"end: {end} => {desc_end}")
+                        # logger.debug(f"start: {start} => {desc_start}")
+                        # logger.debug(f"end: {end} => {desc_end}")
                         add_path(G, sub_path, desc_start >= desc_end)
 
     connected_nodes = set(filter(lambda n: len(list(G.neighbors(n))) > 0, G.nodes()))
