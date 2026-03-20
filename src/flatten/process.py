@@ -186,19 +186,19 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
         in_edges = list(graph.in_edges(graph_node, keys=True))
         out_edges = list(graph.out_edges(graph_node, keys=True))
         if (len(in_edges) == 1) & (len(out_edges) >= 1):
-            logger.debug(f"graph_node {graph_node} with {len(in_edges)} and {len(out_edges)}")
+            # logger.debug(f"graph_node {graph_node} with {len(in_edges)} and {len(out_edges)}")
             # make sur the last points of in_edge belong to out_edge
             in_edge = in_edges[0]
             if in_edge in edge_profiles:
                 in_left, in_right = edge_profiles[in_edge]
                 last_left = in_left[-1]
                 last_right = in_right[-1]
-                logger.debug(f"last_left={last_left} last_right={last_right}")
+                # logger.debug(f"last_left={last_left} last_right={last_right}")
                 for out_edge in out_edges:
                     if out_edge in edge_profiles:
                         out_left, out_right = edge_profiles[out_edge]
                         modif = False
-                        logger.debug(f"{out_edge} with {out_left[0][0]} and {out_right[0][0]} and {len(out_left)} {len(out_right)}")
+                        # logger.debug(f"{out_edge} with {out_left[0][0]} and {out_right[0][0]} and {len(out_left)} {len(out_right)}")
                         if last_left[0] != out_left[0][0]:
                             out_left.insert(
                                 0, (last_left[0], None)
@@ -210,22 +210,22 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
                             )  # we don't keep bottleneck info
                             modif = True
                         if modif:
-                            logger.debug(f"modif {len(out_left)} {len(out_right)}")
+                            # logger.debug(f"modif {len(out_left)} {len(out_right)}")
                             edge_profiles[out_edge] = out_left, out_right
         elif (len(in_edges) > 1) & (len(out_edges) == 1):
-            logger.debug(f"graph_node {graph_node} with {len(in_edges)} and {len(out_edges)}")
+            # logger.debug(f"graph_node {graph_node} with {len(in_edges)} and {len(out_edges)}")
             # make sur the first points of out_edge belong to out_edge
             out_edge = out_edges[0]
             if out_edge in edge_profiles:
                 out_left, out_right = edge_profiles[out_edge]
                 first_left = out_left[0]
                 first_right = out_right[0]
-                logger.debug(f"first_left={first_left} first_right={first_right}")
+                # logger.debug(f"first_left={first_left} first_right={first_right}")
                 for in_edge in in_edges:
                     if in_edge in edge_profiles:
                         in_left, in_right = edge_profiles[in_edge]
                         modif = False
-                        logger.debug(f"{in_edge} with {in_left[0][0]} and {in_right[0][0]} and {len(in_left)} {len(in_right)}")
+                        # logger.debug(f"{in_edge} with {in_left[0][0]} and {in_right[0][0]} and {len(in_left)} {len(in_right)}")
                         if first_left[0] != in_left[0][0]:
                             in_left.append((first_left[0], None))  # we don't keep bottleneck info
                             modif = True
@@ -233,7 +233,7 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
                             in_right.append((first_right[0], None))  # we don't keep bottleneck info
                             modif = True
                         if modif:
-                            logger.debug(f"modif {len(in_left)} {len(in_right)}")
+                            # logger.debug(f"modif {len(in_left)} {len(in_right)}")
                             edge_profiles[in_edge] = in_left, in_right
 
     for edge_order, (edge, (left, right)) in enumerate(edge_profiles.items()):
@@ -304,6 +304,27 @@ def main(srs: str, in_box: tuple[float, float, float, float], max_segment_length
     logger.info(f"{datetime.now()} - all done!")
     return gdf_points, gdf_split
 
+def optimal_triangle_height(p1: Point, p2: Point, p3: Point) -> Point:
+    """
+    Calculate optimal p3 to make triangle as horizontal as possible.
+    
+    Args:
+        p1: (x1, y1, z1) - first point (fixed)
+        p2: (x2, y2, z2) - second point (fixed)
+        p3: (x3, y3, z3) - third point (optimal z3 will be calculated)
+    
+    Returns:
+        p3: third point with optimal height
+    """
+    # 2D vectors
+    v12 = np.array([p2.x - p1.x, p2.y - p1.y])
+    v13 = np.array([p3.x - p1.x, p3.y - p1.y])
+    # Slope from P1 to P2
+    dz12 = p2.z - p1.z
+    # Optimal z3
+    z3 = p1.z + dz12 * np.dot(v12, v13) / np.dot(v12, v12)
+    return Point(p3.x, p3.y, z3)
+
 if __name__ == "__main__":
     logger.setLevel("DEBUG")
     logger.addHandler(logging.StreamHandler())
@@ -322,7 +343,8 @@ if __name__ == "__main__":
                 new_triangle = triangle.copy()
                 coords = triangle["geometry"].exterior.coords
                 triangle_indices = []
-                for coord in coords:
+                missing_indices = []
+                for coord_index, coord in enumerate(coords):
                     tol = 1e-9
                     mask = (np.abs(points.geometry.x - coord[0]) < tol) & (
                         np.abs(points.geometry.y - coord[1]) < tol
@@ -330,13 +352,32 @@ if __name__ == "__main__":
                     matches = points.geometry[mask]
                     if any(matches):
                         triangle_indices.append(matches.index[0])
-                if (len(triangle_indices) == 4):
+                    else:
+                        # logger.debug(f"coord_index not found = {coord_index}")
+                        missing_indices.append(coord_index)
+                        triangle_indices.append(-1)
+                if (len(missing_indices) == 0):
                     new_triangle["geometry"] = Polygon([
                         points.geometry.iat[triangle_indices[0]], # type: ignore
                         points.geometry.iat[triangle_indices[1]], # type: ignore
                         points.geometry.iat[triangle_indices[2]], # type: ignore
                         points.geometry.iat[triangle_indices[0]], # type: ignore
                     ])
+                    final_triangles.append(new_triangle)
+                elif (len(missing_indices) == 1):
+                    missing_index = missing_indices[0]
+                    # logger.debug(f"missing_index = {missing_index}")
+                    # there is one point missing, let's guess its height
+                    index_1 = triangle_indices[(missing_index-1)%4]
+                    index_2 = triangle_indices[(missing_index+1)%4]
+                    # logger.debug(f"index_1 = {index_1} index_2 = {index_2}")
+                    p1: Point = points.geometry.iat[index_1] # type: ignore
+                    p2: Point = points.geometry.iat[index_2] # type: ignore
+                    p3 = Point(coords[missing_index])
+                    # logger.debug(f"p1 = {p1} p2 = {p2} p3 = {p3}")
+                    p3_opt = optimal_triangle_height(p1, p2, p3)
+                    # logger.debug(f"p3'={p3_opt}")
+                    new_triangle["geometry"] = Polygon([p1,p2,p3_opt,p1])
                     final_triangles.append(new_triangle)
             final_triangles_gdf = gpd.GeoDataFrame(final_triangles, crs=points.crs)
             final_triangles_gdf.to_file(output_file, layer="triangles_optimised")
