@@ -190,18 +190,18 @@ def get_oriented_graph(gdf_triangle: gpd.GeoDataFrame, gdf_segment: gpd.GeoDataF
 
     connected_nodes = set(filter(lambda n: len(list(G.neighbors(n))) > 0, G.nodes()))
     # connect the remaining edges from the triangle graph starting from the ones connected to the directed graph
-    # while len(connected_nodes) < len(G.nodes):
-    #     edges = [
-    #         (a, b)
-    #         for (a, b) in triangle_graph.edges
-    #         if (a in connected_nodes) ^ (b in connected_nodes)
-    #         # a or b has to be connected but not both
-    #     ]
-    #     for a, b in edges:
-    #         start = a if a in connected_nodes else b
-    #         end = b if a in connected_nodes else a
-    #         add_path(G, [start, end], True)
-    #         connected_nodes.add(end)
+    while len(connected_nodes) < len(G.nodes):
+        edges = [
+            (a, b)
+            for (a, b) in triangle_graph.edges
+            if (a in connected_nodes) ^ (b in connected_nodes)
+            # a or b has to be connected but not both
+        ]
+        for a, b in edges:
+            start = a if a in connected_nodes else b
+            end = b if a in connected_nodes else a
+            add_path(G, [start, end], True)
+            connected_nodes.add(end)
 
     # Show arcs with the originating edge(s)
     # for u, v, data in G.edges(data=True):
