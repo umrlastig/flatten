@@ -1,6 +1,7 @@
 from datetime import datetime
 import geopandas as gpd
 import cvxpy as cp
+import scipy.sparse as sp
 import numpy as np
 from itertools import chain
 from shapely import Point
@@ -157,6 +158,32 @@ def sliding_window_generator(lst, n=3):
     for i in range(len(lst) - n + 1):
         yield lst[i:i+n]
 
+def build_second_difference_matrix(n, consecutive_points):
+    """
+    Build sparse matrix D where D @ z gives all second differences.
+    Each row corresponds to one triplet (i, j, k) with coefficients [1, -2, 1].
+    """
+    rows = []
+    cols = []
+    data = []
+    
+    for consecutive in consecutive_points:
+        if len(consecutive) < 3:
+            continue
+            
+        for idx in range(len(consecutive) - 2):
+            i, j, k = consecutive[idx], consecutive[idx+1], consecutive[idx+2]
+            
+            # Row for this triplet
+            row_idx = len(rows) // 3  # Each triplet adds 3 entries
+            
+            rows.extend([row_idx, row_idx, row_idx])
+            cols.extend([i, j, k])
+            data.extend([1.0, -2.0, 1.0])
+    
+    num_triplets = len(rows) // 3
+    return sp.coo_matrix((data, (rows, cols)), shape=(num_triplets, n)).tocsr()
+
 def optimize_all_segments(
     points: gpd.GeoDataFrame,
     alpha: float = 1.0,
@@ -208,8 +235,8 @@ def optimize_all_segments(
             pairs.append((left, right))
             # print("pair",left, right)
 
-    z0 = unique_points["geometry"].z # original heights
-    # Fixed‑height specifications (list of (index, height))
+    # original heights
+    z0 = np.array(unique_points["geometry"].z)
     n = len(z0)
     # variables
     z = cp.Variable(n)
@@ -219,45 +246,53 @@ def optimize_all_segments(
     obj += alpha * cp.sum_squares(z - z0)
     # pairwise consistency (bottlenecks)
     obj += beta * cp.sum([cp.square(z[i] - z[j]) for i, j in pairs])
-    # print("consecutive_points")
-    # for consecutive in consecutive_points:
-    #     print(consecutive)
-    #     for i,j in sliding_window_generator(consecutive,2):
-    #         print(i,j)
     if gamma > 0:
         # second‑difference smoothness
-        for consecutive in consecutive_points:
-            obj += gamma * cp.sum([cp.square(z[i] - 2 * z[j] + z[k]) for i,j,k in sliding_window_generator(consecutive)])
+        # for consecutive in consecutive_points:
+        #     obj += gamma * cp.sum([cp.square(z[i] - 2 * z[j] + z[k]) for i,j,k in sliding_window_generator(consecutive)])
+        D = build_second_difference_matrix(n, consecutive_points)
+        obj += gamma * cp.sum_squares(D @ z)
     # monotonicity constraints
     constraints = []
     for consecutive in consecutive_points:
         constraints += [z[j] >= z[i] for i,j in sliding_window_generator(consecutive,2)]
     # solve
     prob = cp.Problem(cp.Minimize(obj), constraints)
-    res = prob.solve(solver=cp.OSQP, max_iter=100_000)        
-    # results
-    z_opt = z.value
+    # Try OSQP first (fast for QP), fallback to ECOS if needed
+    try:
+        res = prob.solve(solver=cp.OSQP, max_iter=50_000, eps_abs=1e-6, eps_rel=1e-6)
+    except Exception as e:
+        print(f"OSQP failed: {e}. Trying ECOS...")
+        res = prob.solve(solver=cp.ECOS)
 
-    if isinstance(res, float) and (math.isinf(res)):
+    # Check Status
+    if prob.status in ["optimal", "optimal_inaccurate"]:
+        print(f"Optimization successful. Status: {prob.status}")
+        print(f"Objective value: {prob.value:.4f}")
+        # results
+        z_opt = z.value
+        points['old_z'] = points['unique_id'].map(lambda x: z0.tolist()[x])
+        points['new_z'] = points['unique_id'].map(lambda x: z_opt.tolist()[x]) # type: ignore
+        xs = points.geometry.x
+        ys = points.geometry.y
+        zs_new = points['new_z']
+
+        # Reconstruct geometries
+        points['geometry'] = [Point(x, y, z) for x, y, z in zip(xs, ys, zs_new)] # type: ignore
+        return points
+
+    else:
+        print(f"Optimization failed. Status: {prob.status}")
+        print(f"Reason: {prob.status}")
+        # if isinstance(res, float) and (math.isinf(res)):
         logger.error(f"res = {res}")
         logger.error(f"segment_order = {segment_left["segment_order"].tolist()[0]}")
         logger.error(f"left = {segment_left["geometry"].tolist()}")
         logger.error(f"right = {segment_right["geometry"].tolist()}")
         logger.error(f"z0 = {z0.tolist()}")
-        logger.debug(f"z_opt = {z_opt}")
-    if (z_opt is None):
+        # logger.debug(f"z_opt = {z_opt}")
+        # if (z_opt is None):
         return None
-    
-    points['old_z'] = points['unique_id'].map(lambda x: z0.tolist()[x])
-    points['new_z'] = points['unique_id'].map(lambda x: z_opt.tolist()[x])
-    xs = points.geometry.x
-    ys = points.geometry.y
-    zs_new = points['new_z']
-
-    # Reconstruct geometries
-    points['geometry'] = [Point(x, y, z) for x, y, z in zip(xs, ys, zs_new)] # type: ignore
-    return points
-
 
 def modify_heights(
     points: gpd.GeoDataFrame, segments: gpd.GeoDataFrame, heights: list[float]
