@@ -194,11 +194,10 @@ def main():
     srs = "urn:ogc:def:crs:EPSG::2154"
     box = (1036535, 6289927, 1042268, 6305786, srs)
     output_file = "triangle_graph.gpkg"
-    r = get_hydro_data(box, srs)
-    if not r:
+    (surfaces, gdf_segment, _) = get_hydro_data(box, srs)
+    if (surfaces is None) or (gdf_segment is None):
         logger.error("no data")
         return
-    (surfaces, gdf_segment, _) = r
     triangles = get_triangles(surfaces, 20.0)
     _, edge_gdf, has_no_cycle = get_oriented_graph(triangles, gdf_segment)
     edge_gdf.to_file(output_file, layer="edges")

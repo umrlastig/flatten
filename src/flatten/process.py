@@ -134,11 +134,10 @@ def main(
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame] | None:
     logger.info(f"{datetime.now()} - start")
     box = (in_box[0], in_box[1], in_box[2], in_box[3], srs)
-    r = get_hydro_data(box, srs)
-    if not r:
-        logger.error("no data")
+    (surfaces, segments, _) = get_hydro_data(box, srs)
+    if (surfaces is None) or (segments is None):
+        logger.error("no surface data or no segment data")
         return None
-    (surfaces, segments, _) = r
     # triangles = get_triangles(surfaces, max_segment_length)
     gdf_triangle, gdf_triangle_segment, gdf_split = get_graph(
         surfaces, max_segment_length

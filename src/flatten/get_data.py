@@ -144,11 +144,10 @@ def main():
     box = (1036535, 6289927, 1042268, 6305786, srs)
     output_file = "temp.gpkg"
 
-    r = get_hydro_data(box, srs)
-    if r is None:
+    (surface, segment, node) = get_hydro_data(box, srs)
+    if (surface is None) or (segment is None) or (node is None):
         logger.error("no data")
         return
-    (surface, segment, node) = r
     gdf_nodes = get_sources_and_targets(segment)
     gdf_triangle, gdf_triangle_segment, split = get_graph(surface, 20.0)
     # keep only the unconstrained segments
