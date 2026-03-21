@@ -1,13 +1,11 @@
 from flatten.utils import get_triangles
 from flatten.wfs import get_hydro_data
 from flatten.triangle_graph import get_triangle_graph_as_nx
-from shapely import LineString, union_all, constrained_delaunay_triangles
+from shapely import LineString
 import geopandas as gpd
-import pandas as pd
 import networkx as nx
 from networkx.algorithms.dag import descendants
-from itertools import groupby
-from typing import List, Tuple, Set, Any
+from typing import List, Set, Any
 import logging
 
 logger = logging.getLogger(__name__)

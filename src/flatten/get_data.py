@@ -1,22 +1,14 @@
-from typing import Optional, Union
+from typing import Union
 import pandas as pd
 import geopandas as gpd
-from geopandas.tools._random import uniform
-import shapely
-from shapely import LineString, Point, MultiPoint
+from shapely import Point, MultiPoint
 from shapely.geometry.geo import shape
-from flatten.split import get_segments
-from flatten.elevation import throttle_requests
 import networkx as nx
-import numpy
-from pyproj import Transformer
-from pyinterpolate import inverse_distance_weighting
+from flatten.triangle_graph import get_graph
 from flatten.utils import (
-    get_bottlenecks,
     get_profiles,
     split_by_first_false,
     merge_profile_points,
-    split_triangles_with_bottlenecks,
 )
 from flatten.wfs import get_hydro_data
 import logging
@@ -92,140 +84,6 @@ def get_sources_and_targets(segment: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         crs=segment.crs,
     )
 
-
-def get_triangles_with_height(
-    union, crs, sample_points, elevations
-) -> gpd.GeoDataFrame:
-    triangles = shapely.constrained_delaunay_triangles(union)
-
-    def triangle_height(geom: shapely.Polygon) -> float:
-        # keep only 3 points and select the z value
-        z_values = shapely.get_coordinates(geom, include_z=True)[:3, 2]
-        z_values = z_values[~numpy.isnan(z_values)]
-        return z_values.mean()
-
-    print("Triangles:", len(triangles.geoms))
-    # use crs from input file
-    triangle_list = [p for p in triangles.geoms]
-    triangle_heights = [triangle_height(p) for p in triangles.geoms]  # type: ignore
-    triangle_centroids = [[p.centroid.x, p.centroid.y] for p in triangles.geoms]
-    triangle_elevations = []
-    for c in triangle_centroids:
-        triangle_elevations.append(
-            inverse_distance_weighting(
-                unknown_location=c,
-                known_values=elevations,
-                known_geometries=sample_points,
-                power=2.0,
-            )
-        )
-    gdf_triangle = gpd.GeoDataFrame(
-        pd.DataFrame(
-            {
-                "triangle_id": list(range(0, len(triangle_list))),
-                "triangle_height": triangle_heights,
-                "triangle_elevation_rge": triangle_elevations,
-            }
-        ),
-        geometry=triangle_list,
-        crs=crs,
-    )
-    return gdf_triangle
-
-
-def get_graph(
-    surfaces: gpd.GeoDataFrame, max_segment_length: float
-) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    # union = shapely.union_all(surfaces.geometry).simplify(0.1, preserve_topology=True)
-    union = shapely.union_all(surfaces.geometry).segmentize(max_segment_length)
-    # sample points
-    number_of_points = int(
-        union.area / 10000
-    )  # computed according to the surface of union (1 point per hectare)
-    print("number_of_points", number_of_points)
-    sample_multipoint: shapely.MultiPoint = uniform(union, number_of_points, 42)  # type: ignore
-    sample_points = [(p.x, p.y) for p in sample_multipoint.geoms]
-
-    transformer = Transformer.from_crs(surfaces.crs, 4326)
-    elevations = throttle_requests(list(transformer.itransform(sample_points)))
-    assert len(elevations) == len(sample_points)
-
-    gdf_triangle = get_triangles_with_height(
-        union, surfaces.crs, sample_points, elevations
-    )
-    # triangle_graph: gpd.GeoDataFrame = get_triangle_graph(gdf_triangle)
-    # triangle_graph = neatnet.remove_interstitial_nodes(triangle_graph) # type: ignore
-    # print("triangle_graph",len(triangle_graph))
-    # oriented_triangle_graph = orient_triangle_graph(triangle_graph, gdf_triangle)
-
-    triangle_segment = list(set(get_segments(gdf_triangle.geometry)))
-    # determine if segments belong to the boundary: if they do, they must be constraints
-    triangle_segment_constraint = list(
-        map(lambda s: union.boundary.contains(s), triangle_segment)
-    )
-    gdf_triangle_segment = gpd.GeoDataFrame(
-        {
-            "triangle_segment_id": list(range(0, len(triangle_segment))),
-            "constraint": triangle_segment_constraint,
-        },
-        geometry=triangle_segment,
-        crs=surfaces.crs,
-    )
-    # merge with bottlenecks
-    gdf_triangle_segment["type"] = gdf_triangle_segment["constraint"].apply(
-        lambda b: "constrained" if b else "unconstrained"
-    )
-    gdf_triangle_segment = gdf_triangle_segment.rename(
-        columns={"triangle_segment_id": "tmp_id"}
-    )
-    gdf_bottlenecks = get_bottlenecks(gdf_triangle, gdf_triangle_segment)
-
-    gdf_split = split_triangles_with_bottlenecks(gdf_triangle, gdf_bottlenecks)
-
-    def add_height(row) -> Optional[LineString]:
-        line = row["geometry"]
-        if not line:
-            return None
-        coordinates: list[list[float]] = shapely.get_coordinates(
-            line, include_z=False
-        ).tolist()
-        height0 = inverse_distance_weighting(
-            unknown_location=coordinates[0],
-            known_values=elevations,
-            known_geometries=sample_points,
-            power=2.0,
-        )
-        height1 = inverse_distance_weighting(
-            unknown_location=coordinates[-1],
-            known_values=elevations,
-            known_geometries=sample_points,
-            power=2.0,
-        )
-        return LineString([(*coordinates[0], height0), (*coordinates[-1], height1)])
-
-    # gdf_bottlenecks["geometry"] = gdf_bottlenecks.apply(add_height, axis=1)
-    gdf_bottlenecks["constraint"] = False
-    gdf_bottlenecks["type"] = "bottleneck"
-    gdf_bottlenecks = gdf_bottlenecks.rename(columns={"triangle_id": "tmp_id"})
-    gdf_bottlenecks = gdf_bottlenecks.set_crs(
-        gdf_triangle_segment.crs,  # type: ignore
-        allow_override=True,
-    )  # type: ignore
-
-    unified: gpd.GeoDataFrame = pd.concat(
-        [gdf_triangle_segment, gdf_bottlenecks], ignore_index=True, sort=False
-    )  # type: ignore
-    # Cast the constraint column to a proper boolean dtype (in case concat made it object)
-    unified["constraint"] = unified["constraint"].astype(bool)
-    # Re‑order columns for readability (optional)
-    unified.insert(0, "triangle_segment_id", range(len(unified)))  # 0‑based integer IDs
-    unified = unified[["triangle_segment_id", "constraint", "type", "geometry"]]
-    # recompute height for all segments
-    unified["geometry"] = unified.apply(add_height, axis=1)
-    unified = unified.set_crs(gdf_triangle_segment.crs, allow_override=True)  # type: ignore
-    return gdf_triangle, unified, gdf_split  # type: ignore #, oriented_triangle_graph#gdf_edges
-
-
 def add_intersection_column(
     gdf: gpd.GeoDataFrame, overlay: gpd.GeoDataFrame, id_name: str, column_name: str
 ) -> gpd.GeoDataFrame:
@@ -267,7 +125,7 @@ def filter_intersections_on_endpoints(
         start, end = line.coords[0], line.coords[-1]
         return MultiPoint([Point(start), Point(end)])
 
-    print("overlay\n", overlay.head())
+    # print("overlay\n", overlay.head())
     # Create a GeoSeries whose index aligns with gdf_a
     endpoints = gdf.geometry.apply(line_endpoints)  # type: ignore
     overlay = overlay.join(endpoints.rename("_endpoints"), on="triangle_segment_id")
@@ -277,7 +135,7 @@ def filter_intersections_on_endpoints(
     clean_result = overlay[mask_not_on_endpoint].copy()
     # Drop the helper column
     clean_result = clean_result.drop(columns=["_endpoints"])
-    print("clean_result\n", clean_result.head())
+    # print("clean_result\n", clean_result.head())
     return clean_result
 
 
@@ -327,7 +185,7 @@ def main():
     gdf_triangle_segment["hydro_segment_id"] = gdf_triangle_segment[
         "hydro_segment_id"
     ].astype("str")
-    print("segment\n", segment)
+    logger.info(f"segment\n{segment}")
     directed_graph = get_directed_graph(segment, True)
     edges = list(nx.topological_sort(nx.line_graph(directed_graph)))
     segment_order = []
@@ -350,7 +208,7 @@ def main():
         if profiles:
             left, right = profiles
             edge_profiles[edge] = (left, right)
-    print(len(directed_graph.edges), "edges")
+    logger.info(f"{len(directed_graph.edges)} edges")
     # move shared points up or down
     for graph_edge in directed_graph.edges:
         if graph_edge in edge_profiles:
@@ -359,20 +217,20 @@ def main():
             segment_key = attributes["edge_key"]
             if (left[0][1] is True) & (right[0][1] is True):
                 in_edges = list(directed_graph.in_edges(graph_edge[0]))
-                print(
-                    "shared at start",
-                    segment_key,
-                    len(in_edges),
-                    "with",
-                    len(left),
-                    len(right),
-                )
+                # print(
+                #     "shared at start",
+                #     segment_key,
+                #     len(in_edges),
+                #     "with",
+                #     len(left),
+                #     len(right),
+                # )
                 if len(in_edges) == 1:
                     in_edge = in_edges[0]
                     sub_left, left = split_by_first_false(left)
                     sub_right, right = split_by_first_false(right)
-                    print("\tleft", len(sub_left), len(left))
-                    print("\tright", len(sub_right), len(right))
+                    # print("\tleft", len(sub_left), len(left))
+                    # print("\tright", len(sub_right), len(right))
                     if in_edge in edge_profiles:
                         in_left, in_right = edge_profiles[in_edge]
                         in_left.extend(sub_left)
@@ -387,20 +245,20 @@ def main():
             if (len(left) > 0) & (len(right) > 0):
                 if (left[-1][1] is True) & (right[-1][1] is True):
                     out_edges = list(directed_graph.out_edges(graph_edge[1]))
-                    print(
-                        "shared at end",
-                        segment_key,
-                        len(out_edges),
-                        "with",
-                        len(left),
-                        len(right),
-                    )
+                    # print(
+                    #     "shared at end",
+                    #     segment_key,
+                    #     len(out_edges),
+                    #     "with",
+                    #     len(left),
+                    #     len(right),
+                    # )
                     if len(out_edges) == 1:
                         out_edge = out_edges[0]
                         sub_left, left = split_by_first_false(left, reverse=True)
                         sub_right, right = split_by_first_false(right, reverse=True)
-                        print("\tleft", len(sub_left), len(left))
-                        print("\tright", len(sub_right), len(right))
+                        # print("\tleft", len(sub_left), len(left))
+                        # print("\tright", len(sub_right), len(right))
                         if out_edge in edge_profiles:
                             out_left, out_right = edge_profiles[out_edge]
                             sub_left.extend(out_left)

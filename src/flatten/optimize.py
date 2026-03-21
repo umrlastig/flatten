@@ -158,6 +158,23 @@ logger = logging.getLogger(__name__)
 #     for i in range(len(lst) - n + 1):
 #         yield lst[i:i+n]
 
+def build_pairwise_difference_matrix(n, pairs):
+    """
+    Build sparse matrix D where D @ z gives all pairwise differences.
+    Each row corresponds to one pair (i, j) with coefficients [1, -1].
+    """
+    num_pairs = len(pairs)
+    rows = []
+    cols = []
+    data = []
+    
+    for row_idx, (i, j) in enumerate(pairs):
+        rows.extend([row_idx, row_idx])
+        cols.extend([i, j])
+        data.extend([1.0, -1.0])
+    
+    D = sp.coo_matrix((data, (rows, cols)), shape=(num_pairs, n)).tocsr()
+    return D
 
 def build_second_difference_matrix(n, consecutive_points):
     """
@@ -170,14 +187,13 @@ def build_second_difference_matrix(n, consecutive_points):
 
     for consecutive in consecutive_points:
         if len(consecutive) < 3:
+            # not enough points, no second difference
             continue
-
+        # iterate through points 3 by 3
         for idx in range(len(consecutive) - 2):
             i, j, k = consecutive[idx], consecutive[idx + 1], consecutive[idx + 2]
-
             # Row for this triplet
             row_idx = len(rows) // 3  # Each triplet adds 3 entries
-
             rows.extend([row_idx, row_idx, row_idx])
             cols.extend([i, j, k])
             data.extend([1.0, -2.0, 1.0])
@@ -210,7 +226,6 @@ def optimize_all_segments(
     pairs: list[tuple[int, int]] = []
     segment_orders = sorted(set(points["segment_order"].tolist()))
     for segment_order in segment_orders:
-        # print("segment_order",segment_order)
         segment_left = points[
             (points["segment_order"] == segment_order)
             & (points["point_position"] == "left")
@@ -219,11 +234,10 @@ def optimize_all_segments(
             (points["segment_order"] == segment_order)
             & (points["point_position"] == "right")
         ].sort_values(by=["point_order"])
-        # print("left",segment_left["unique_id"].tolist())
-        # print("right",segment_right["unique_id"].tolist())
+        # build consecutive points from each segment
         consecutive_points.append(segment_left["unique_id"].tolist())
         consecutive_points.append(segment_right["unique_id"].tolist())
-        # handling bottlenecks
+        # handling bottlenecks (as pairs)
         bottlenecks_left = segment_left["point_bottlenecks"].tolist()
         bottlenecks_right = segment_right["point_bottlenecks"].tolist()
         bottlenecks = sorted(set(list(chain.from_iterable(bottlenecks_left))))
@@ -235,7 +249,6 @@ def optimize_all_segments(
                 if b in r_l:
                     right = segment_right.iloc[i]["unique_id"]
             pairs.append((left, right))
-            # print("pair",left, right)
 
     # original heights
     z0 = np.array(unique_points["geometry"].z)
@@ -246,12 +259,15 @@ def optimize_all_segments(
     obj = 0
     # fidelity to the original heights
     obj += alpha * cp.sum_squares(z - z0)
-    # pairwise consistency (bottlenecks)
-    obj += beta * cp.sum([cp.square(z[i] - z[j]) for i, j in pairs])
+    if beta > 0:
+        # pairwise consistency (bottlenecks)
+        # obj += beta * cp.sum([cp.square(z[i] - z[j]) for i, j in pairs])
+        # Build difference matrix for pairwise consistency (bottlenecks)
+        D_pairs = build_pairwise_difference_matrix(n, pairs)
+        # Vectorized pairwise term
+        obj += beta * cp.sum_squares(D_pairs @ z)
     if gamma > 0:
         # second‑difference smoothness
-        # for consecutive in consecutive_points:
-        #     obj += gamma * cp.sum([cp.square(z[i] - 2 * z[j] + z[k]) for i,j,k in sliding_window_generator(consecutive)])
         D = build_second_difference_matrix(n, consecutive_points)
         obj += gamma * cp.sum_squares(D @ z)
     # monotonicity constraints
@@ -265,15 +281,15 @@ def optimize_all_segments(
     prob = cp.Problem(cp.Minimize(obj), constraints)
     # Try OSQP first (fast for QP), fallback to ECOS if needed
     try:
-        res = prob.solve(solver=cp.OSQP, max_iter=50_000, eps_abs=1e-6, eps_rel=1e-6)
+        res = prob.solve(solver=cp.OSQP, max_iter=100_000, eps_abs=1e-6, eps_rel=1e-6)
     except Exception as e:
-        print(f"OSQP failed: {e}. Trying ECOS...")
-        res = prob.solve(solver=cp.ECOS)
+        logger.error(f"OSQP failed: {e}. Trying ECOS...")
+        res = prob.solve(solver=cp.ECOS, max_iter=100_000, eps_abs=1e-6, eps_rel=1e-6)
 
     # Check Status
     if prob.status in ["optimal", "optimal_inaccurate"]:
-        print(f"Optimization successful. Status: {prob.status}")
-        print(f"Objective value: {prob.value:.4f}")
+        logger.info(f"Optimization successful. Status: {prob.status}")
+        logger.info(f"Objective value: {prob.value:.4f}")
         # results
         z_opt = z.value
         points["old_z"] = points["unique_id"].map(lambda x: z0.tolist()[x])
@@ -284,25 +300,18 @@ def optimize_all_segments(
 
         # Reconstruct geometries
         points["geometry"] = [Point(x, y, z) for x, y, z in zip(xs, ys, zs_new)]  # type: ignore
+        verify_pairwise_consistency(z_opt, pairs, beta)
         verify_smoothness(z_opt, consecutive_points)
         return points
 
     else:
-        print(f"Optimization failed. Status: {prob.status}")
-        print(f"Reason: {prob.status}")
-        # if isinstance(res, float) and (math.isinf(res)):
+        logger.error(f"Optimization failed. Status: {prob.status}")
+        logger.error(f"Reason: {prob.status}")
         logger.error(f"res = {res}")
-        logger.error(f"segment_order = {segment_left['segment_order'].tolist()[0]}")
-        logger.error(f"left = {segment_left['geometry'].tolist()}")
-        logger.error(f"right = {segment_right['geometry'].tolist()}")
-        logger.error(f"z0 = {z0.tolist()}")
-        # logger.debug(f"z_opt = {z_opt}")
-        # if (z_opt is None):
         return None
 
-
 def verify_smoothness(z_vals, consecutive_points):
-    """Verify the matrix formulation matches the loop version"""
+    """Verify the matrix formulation matches the loop version."""
     # Loop version
     loop_sum = 0
     for consecutive in consecutive_points:
@@ -317,8 +326,19 @@ def verify_smoothness(z_vals, consecutive_points):
     matrix_sum = np.sum((D @ z_vals) ** 2)
 
     assert abs(loop_sum - matrix_sum) < 1e-6, "Formulations don't match!"
-    print(f"Smoothness terms match: {loop_sum:.6f}")
+    logger.info(f"Smoothness terms match: {loop_sum:.6f}")
 
+def verify_pairwise_consistency(z_vals, pairs, beta):
+    """Verify that the vectorized and loop versions give same result."""
+    # Loop version
+    loop_sum = sum((z_vals[i] - z_vals[j])**2 for i, j in pairs)
+    
+    # Vectorized version
+    D = build_pairwise_difference_matrix(len(z_vals), pairs)
+    vec_sum = np.sum((D @ z_vals)**2)
+    
+    assert abs(loop_sum - vec_sum) < 1e-6, "Results don't match!"
+    logger.info(f"Pairwise terms match: {loop_sum:.6f}")
 
 # def modify_heights(
 #     points: gpd.GeoDataFrame, segments: gpd.GeoDataFrame, heights: list[float]

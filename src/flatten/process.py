@@ -10,10 +10,9 @@ import geopandas as gpd
 import shapely
 import networkx as nx
 
-from flatten.get_data import get_graph
 from flatten.optimize import optimize_all_segments
 from flatten.orient_triangle_graph import get_oriented_graph
-from flatten.triangle_graph import remove_interstitial_nodes, reverse
+from flatten.triangle_graph import get_graph, remove_interstitial_nodes, reverse
 from flatten.wfs import get_hydro_data
 
 import logging
@@ -144,7 +143,7 @@ def main(
     gdf_triangle, gdf_triangle_segment, gdf_split = get_graph(
         surfaces, max_segment_length
     )
-
+    logger.info(f"{len(gdf_triangle)} triangles, {len(gdf_triangle_segment)} triangle segments")
     graph, edge_gdf, has_no_cycle = get_oriented_graph(gdf_triangle, segments)
 
     for cycle in list(nx.simple_cycles(graph)):
@@ -161,13 +160,11 @@ def main(
             line_graph, key=lambda x: line_graph.out_degree(x)
         )
     )
+    # reverse the graph (keep the keys) and the sorting too
     graph = reverse(graph)
     sorted_edges.reverse()
+    # reverse the edges in the sorted edges (keep the keys)
     sorted_edges = [(v, u, k) for (u, v, k) in sorted_edges]
-    # reverse and simplify graph by removing simple nodes (1 incoming edge, 1 outgoing edge)
-    # graph = remove_interstitial_nodes(reverse(graph))
-    # sorted_edges = list(nx.topological_sort(nx.line_graph(graph)))
-    # edges = sort_edges_by_max_intersections(graph)
 
     segment_order = []
     segment_id = []
@@ -189,7 +186,7 @@ def main(
             left, right = profiles
             edge_profiles[edge] = (left, right)
 
-    print(len(graph.edges), "edges")
+    logger.info(f"{len(graph.edges)} edges")
     # remove edges without any profile
     to_remove = []
     for graph_edge in graph.edges:
@@ -197,7 +194,7 @@ def main(
             to_remove.append(graph_edge)
     for graph_edge in to_remove:
         graph.remove_edge(*graph_edge)
-    print(len(graph.edges), "edges after cleanup")
+    logger.info(f"{len(graph.edges)} edges after cleanup")
     for graph_node in graph.nodes:
         in_edges = list(graph.in_edges(graph_node, keys=True))
         out_edges = list(graph.out_edges(graph_node, keys=True))
@@ -346,62 +343,66 @@ def optimal_triangle_height(p1: Point, p2: Point, p3: Point) -> Point:
     z3 = p1.z + dz12 * np.dot(v12, v13) / np.dot(v12, v12)
     return Point(p3.x, p3.y, z3)
 
+def optimize_triangles(points: gpd.GeoDataFrame, triangles: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Apply the optimized points to the triangles.
+    """
+    final_triangles = []
+    for _, triangle in triangles.iterrows():
+        new_triangle = triangle.copy()
+        coords = triangle["geometry"].exterior.coords
+        triangle_indices = []
+        missing_indices = []
+        for coord_index, coord in enumerate(coords):
+            tol = 1e-9
+            mask = (np.abs(points.geometry.x - coord[0]) < tol) & (
+                np.abs(points.geometry.y - coord[1]) < tol
+            )
+            matches = points.geometry[mask]
+            if any(matches):
+                triangle_indices.append(matches.index[0])
+            else:
+                missing_indices.append(coord_index)
+                triangle_indices.append(-1)
+        if len(missing_indices) == 0:
+            new_triangle["geometry"] = Polygon(
+                [
+                    points.geometry.iat[triangle_indices[0]],  # type: ignore
+                    points.geometry.iat[triangle_indices[1]],  # type: ignore
+                    points.geometry.iat[triangle_indices[2]],  # type: ignore
+                    points.geometry.iat[triangle_indices[0]],  # type: ignore
+                ]
+            )
+            final_triangles.append(new_triangle)
+        elif len(missing_indices) == 1:
+            missing_index = missing_indices[0]
+            # there is one point missing, let's guess its height
+            index_1 = triangle_indices[(missing_index - 1) % 4]
+            index_2 = triangle_indices[(missing_index + 1) % 4]
+            p1: Point = points.geometry.iat[index_1]  # type: ignore
+            p2: Point = points.geometry.iat[index_2]  # type: ignore
+            p3 = Point(coords[missing_index])
+            p3_opt = optimal_triangle_height(p1, p2, p3)
+            new_triangle["geometry"] = Polygon([p1, p2, p3_opt, p1])
+            final_triangles.append(new_triangle)
+    return gpd.GeoDataFrame(final_triangles, crs=points.crs)
 
 if __name__ == "__main__":
     logger.setLevel("DEBUG")
     logger.addHandler(logging.StreamHandler())
     srs = "urn:ogc:def:crs:EPSG::2154"
-    box = (1036535, 6289927, 1042268, 6305786)
+    box = (1030000, 6280000, 1040000, 6310000)
     output_file = "triangle_graph.gpkg"
     max_segment_length = 20.0
     res = main(srs, box, max_segment_length, output_file)
     if res is not None:
         points, triangles = res
+        logger.info(f"{datetime.now()} - optimize_all_segments ({len(points)} points, {len(triangles)} triangles)")
         points = optimize_all_segments(points)
         if points is not None:
             points.to_file(output_file, layer="points_optimised")
-            final_triangles = []
-            for _, triangle in triangles.iterrows():
-                new_triangle = triangle.copy()
-                coords = triangle["geometry"].exterior.coords
-                triangle_indices = []
-                missing_indices = []
-                for coord_index, coord in enumerate(coords):
-                    tol = 1e-9
-                    mask = (np.abs(points.geometry.x - coord[0]) < tol) & (
-                        np.abs(points.geometry.y - coord[1]) < tol
-                    )
-                    matches = points.geometry[mask]
-                    if any(matches):
-                        triangle_indices.append(matches.index[0])
-                    else:
-                        # logger.debug(f"coord_index not found = {coord_index}")
-                        missing_indices.append(coord_index)
-                        triangle_indices.append(-1)
-                if len(missing_indices) == 0:
-                    new_triangle["geometry"] = Polygon(
-                        [
-                            points.geometry.iat[triangle_indices[0]],  # type: ignore
-                            points.geometry.iat[triangle_indices[1]],  # type: ignore
-                            points.geometry.iat[triangle_indices[2]],  # type: ignore
-                            points.geometry.iat[triangle_indices[0]],  # type: ignore
-                        ]
-                    )
-                    final_triangles.append(new_triangle)
-                elif len(missing_indices) == 1:
-                    missing_index = missing_indices[0]
-                    # logger.debug(f"missing_index = {missing_index}")
-                    # there is one point missing, let's guess its height
-                    index_1 = triangle_indices[(missing_index - 1) % 4]
-                    index_2 = triangle_indices[(missing_index + 1) % 4]
-                    # logger.debug(f"index_1 = {index_1} index_2 = {index_2}")
-                    p1: Point = points.geometry.iat[index_1]  # type: ignore
-                    p2: Point = points.geometry.iat[index_2]  # type: ignore
-                    p3 = Point(coords[missing_index])
-                    # logger.debug(f"p1 = {p1} p2 = {p2} p3 = {p3}")
-                    p3_opt = optimal_triangle_height(p1, p2, p3)
-                    # logger.debug(f"p3'={p3_opt}")
-                    new_triangle["geometry"] = Polygon([p1, p2, p3_opt, p1])
-                    final_triangles.append(new_triangle)
-            final_triangles_gdf = gpd.GeoDataFrame(final_triangles, crs=points.crs)
+            logger.info(f"{datetime.now()} - optimize triangles ({len(triangles)})")
+            final_triangles_gdf = optimize_triangles(points, triangles)
+            logger.info(f"{datetime.now()} - optimized triangles ({len(final_triangles_gdf)})")
             final_triangles_gdf.to_file(output_file, layer="triangles_optimised")
+            logger.info(f"{datetime.now()} - All done!")

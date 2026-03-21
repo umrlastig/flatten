@@ -12,6 +12,11 @@ from shapely import (
 from shapely.ops import split
 import geopandas as gpd
 from functools import reduce
+import geopandas as gpd
+import pandas as pd
+from shapely.geometry import Point, LineString, Polygon
+from shapely.ops import split
+import numpy as np
 
 
 def find_projection(
@@ -72,15 +77,12 @@ def get_bottlenecks(
     triangles["triangle_geom"] = triangles.geometry.boundary
     triangles = triangles.set_geometry("triangle_geom")
     # Associate each constrained segment with its parent triangle
-    # print("constrained_seg=", constrained_seg)
-    # print("triangles=", triangles)
     assoc = gpd.sjoin(
         constrained_seg,
         triangles,
         how="inner",
         predicate="within",
     )
-    # print("assoc=", assoc)
     # After the join we have: index_left (segment), index_right (triangle)
     # assoc = assoc.rename(columns={ "index_right": id_col })
     assoc = assoc[[id_col, "segment_geom"]].copy()
@@ -105,27 +107,12 @@ def get_bottlenecks(
     )  # columns: triangle_id, triangle_geom, segment_geom
 
     # Compute the bottleneck (projection) for each pair
-    # def _proj(row) -> Optional[LineString]:
-    #     """Wrapper that safely calls find_projection."""
-    #     try:
-    #         return find_projection(row["triangle_geom"], row["segment_geom"])
-    #     except Exception:
-    #         return None
-
     eligible_with_seg["geometry"] = eligible_with_seg.apply(
         lambda row: find_projection(row["triangle_geom"], row["segment_geom"]), axis=1
     )
     # Build the final GeoDataFrame
     result = eligible_with_seg[[id_col, "geometry"]].copy()
     return result.dropna(subset=["geometry"])
-
-
-import geopandas as gpd
-import pandas as pd
-from shapely.geometry import Point, LineString, Polygon
-from shapely.ops import split
-import numpy as np
-
 
 def get_triangles(
     surfaces: gpd.GeoDataFrame, max_segment_length: float

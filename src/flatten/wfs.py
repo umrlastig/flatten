@@ -1,8 +1,13 @@
+import logging
+
 from owslib.wfs import WebFeatureService
 import geojson
 import geopandas as gpd
 from shapely import geometry
 
+logger = logging.getLogger(__name__)
+logger.setLevel("DEBUG")
+logger.addHandler(logging.StreamHandler())
 
 def get_wfs_data(url: str, type_name: str, box, srs) -> gpd.GeoDataFrame | None:
     # Specify the url for the backend.
@@ -28,27 +33,27 @@ def get_hydro_data(box, srs):
         "https://data.geopf.fr/wfs", "BDTOPO_V3:noeud_hydrographique", box, srs
     )
     if (surface is None) or (segment is None) or (nodes is None):
-        print("No surface or no segment found.")
+        logger.error("No surface or no segment found.")
         return None
-    print("Surfaces:", len(surface))
-    print("Segments:", len(segment))
-    print("Nodes:", len(nodes))
+    logger.debug(f"{len(surface)} Surfaces")
+    logger.debug(f"{len(segment)} Segments")
+    logger.debug(f"{len(nodes)} Nodes")
     surface = surface.query('nature == "Ecoulement naturel"')
-    print("mask:", len(surface))
+    logger.debug(f"{len(surface)} mask")
     surface = surface.query('persistance == "Permanent"')
-    print("mask:", len(surface))
+    logger.debug(f"{len(surface)} surface mask")
     box_as_polygon = geometry.box(box[0], box[1], box[2], box[3])
     surface = surface[surface.covered_by(box_as_polygon)]
-    print("mask:", len(surface))
+    logger.debug(f"{len(surface)} surface mask")
     # segment = segment.query('nature == "Ecoulement naturel" OR nature == "Conduit buse"')
     segment = segment[
         (segment["nature"] == "Ecoulement naturel")
         | (segment["nature"] == "Conduit buse")
     ]
-    print("mask:", len(segment))
+    logger.debug(f"{len(segment)} segment mask")
     segment = segment[
         segment["liens_vers_surface_hydrographique"].isin(surface["cleabs"])
         | (segment["nature"] == "Conduit buse")
     ]
-    print("mask:", len(segment))
+    logger.debug(f"{len(segment)} segment mask")
     return (surface, segment, nodes)
