@@ -1,6 +1,8 @@
 import time
+from typing import Callable
 import requests
 import logging
+from pyinterpolate import inverse_distance_weighting
 
 logger = logging.getLogger(__name__)
 logger.setLevel("DEBUG")
@@ -17,7 +19,7 @@ def send_points(points):
     response.raise_for_status()  # raise on HTTP error
     return response.json()
 
-def throttle_requests(points, max_rps=5):
+def throttle_requests(points, max_rps=5) -> list[float]:
     """
     Send `points` to the API without exceeding `max_rps` requests per second.
     """
@@ -40,3 +42,16 @@ def throttle_requests(points, max_rps=5):
         if sleep_time:
             time.sleep(sleep_time)
     return res
+
+def interpolate(sample_points: list[tuple[float,float]], elevations: list[float]) -> Callable[[list[float]], float]:
+    """
+    Create an interpolation function using IDW and the provided `sample_points` and corresponding `elevations`.
+    """
+    def interpolate_coord(c: list[float]) -> float:
+        return inverse_distance_weighting(
+            unknown_location=c,
+            known_values=elevations,
+            known_geometries=sample_points,
+            power=2.0,
+        )
+    return interpolate_coord

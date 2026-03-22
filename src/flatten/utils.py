@@ -1,5 +1,5 @@
 from itertools import groupby, takewhile
-from typing import Any, Optional, Union
+from typing import Any, Union
 import shapely
 from shapely import (
     LinearRing,
@@ -9,14 +9,11 @@ from shapely import (
     constrained_delaunay_triangles,
     union_all,
 )
-from shapely.ops import split
 import geopandas as gpd
 from functools import reduce
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point, LineString, Polygon
-from shapely.ops import split
-import numpy as np
 
 
 def find_projection(

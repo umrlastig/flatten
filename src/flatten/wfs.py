@@ -19,7 +19,6 @@ def get_wfs_data(url: str, type_name: str, box, srs) -> gpd.GeoDataFrame | None:
         )
         # Create GeoDataFrame from geojson and set coordinate reference system
         geojson_features = geojson.loads(response.read())
-        print(geojson_features)
         if len(geojson_features["features"]) == 0:
             return None
         else:

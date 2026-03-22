@@ -1,25 +1,23 @@
-from typing import Optional
+from typing import Callable, Optional
 
 import geopandas as gpd
 import numpy
 import pandas as pd
-from pyproj import Transformer
+from pyproj import CRS
 import shapely
-from shapely import LineString
+from shapely import Geometry, LineString, Polygon
 import networkx as nx
-from pyinterpolate import inverse_distance_weighting
 
-from flatten.elevation import throttle_requests
 from flatten.split import get_segments
 from flatten.utils import get_bottlenecks, split_triangles_with_bottlenecks
 
 
 def get_triangles_with_height(
-    union, crs, sample_points, elevations
+    union: Geometry, crs: CRS|None, get_elevation: Callable[[list[float]],float]
 ) -> gpd.GeoDataFrame:
     triangles = shapely.constrained_delaunay_triangles(union)
 
-    def triangle_height(geom: shapely.Polygon) -> float:
+    def triangle_height(geom: Polygon) -> float:
         # keep only 3 points and select the z value
         z_values = shapely.get_coordinates(geom, include_z=True)[:3, 2]
         z_values = z_values[~numpy.isnan(z_values)]
@@ -29,16 +27,7 @@ def get_triangles_with_height(
     triangle_list = [p for p in triangles.geoms]
     triangle_heights = [triangle_height(p) for p in triangles.geoms]  # type: ignore
     triangle_centroids = [[p.centroid.x, p.centroid.y] for p in triangles.geoms]
-    triangle_elevations = []
-    for c in triangle_centroids:
-        triangle_elevations.append(
-            inverse_distance_weighting(
-                unknown_location=c,
-                known_values=elevations,
-                known_geometries=sample_points,
-                power=2.0,
-            )
-        )
+    triangle_elevations = [get_elevation(c) for c in triangle_centroids]
     gdf_triangle = gpd.GeoDataFrame(
         pd.DataFrame(
             {
@@ -53,25 +42,13 @@ def get_triangles_with_height(
     return gdf_triangle
 
 
-def get_graph(
-    surfaces: gpd.GeoDataFrame, max_segment_length: float
+def get_triangles_and_segments(
+    union: Geometry, get_elevation: Callable[[list[float]],float], crs: CRS|None, max_segment_length: float
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    # union = shapely.union_all(surfaces.geometry).simplify(0.1, preserve_topology=True)
-    union = shapely.union_all(surfaces.geometry).segmentize(max_segment_length)
-    # sample points
-    number_of_points = int(
-        union.area / 10000
-    )  # computed according to the surface of union (1 point per hectare)
-    sample_multipoint: shapely.MultiPoint = uniform(union, number_of_points, 42)  # type: ignore
-    sample_points = [(p.x, p.y) for p in sample_multipoint.geoms]
-
-    transformer = Transformer.from_crs(surfaces.crs, 4326)
-    elevations = throttle_requests(list(transformer.itransform(sample_points)))
-    assert len(elevations) == len(sample_points)
-
-    gdf_triangle = get_triangles_with_height(
-        union, surfaces.crs, sample_points, elevations
-    )
+    """
+    Build the triangles and triangle segments from the input hydro surfaces.    
+    """
+    gdf_triangle = get_triangles_with_height(union, crs, get_elevation)
     # triangle_graph: gpd.GeoDataFrame = get_triangle_graph(gdf_triangle)
     # triangle_graph = neatnet.remove_interstitial_nodes(triangle_graph) # type: ignore
     # print("triangle_graph",len(triangle_graph))
@@ -80,7 +57,7 @@ def get_graph(
     triangle_segment = list(set(get_segments(gdf_triangle.geometry)))
     # determine if segments belong to the boundary: if they do, they must be constraints
     triangle_segment_constraint = list(
-        map(lambda s: union.boundary.contains(s), triangle_segment)
+        map(lambda s: union.boundary.contains(s), triangle_segment) # type: ignore
     )
     gdf_triangle_segment = gpd.GeoDataFrame(
         {
@@ -88,7 +65,7 @@ def get_graph(
             "constraint": triangle_segment_constraint,
         },
         geometry=triangle_segment,
-        crs=surfaces.crs,
+        crs=crs,
     )
     # merge with bottlenecks
     gdf_triangle_segment["type"] = gdf_triangle_segment["constraint"].apply(
@@ -108,18 +85,8 @@ def get_graph(
         coordinates: list[list[float]] = shapely.get_coordinates(
             line, include_z=False
         ).tolist()
-        height0 = inverse_distance_weighting(
-            unknown_location=coordinates[0],
-            known_values=elevations,
-            known_geometries=sample_points,
-            power=2.0,
-        )
-        height1 = inverse_distance_weighting(
-            unknown_location=coordinates[-1],
-            known_values=elevations,
-            known_geometries=sample_points,
-            power=2.0,
-        )
+        height0 = get_elevation(coordinates[0])
+        height1 = get_elevation(coordinates[-1])
         return LineString([(*coordinates[0], height0), (*coordinates[-1], height1)])
 
     # gdf_bottlenecks["geometry"] = gdf_bottlenecks.apply(add_height, axis=1)

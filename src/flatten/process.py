@@ -1,18 +1,21 @@
 from datetime import datetime
-from typing import Union
+from typing import Callable, Union
 from functools import reduce
 from itertools import groupby
 
 import numpy as np
 import pandas as pd
-from shapely import LineString, LinearRing, Point, Polygon
+from pyproj import Transformer
+from shapely import Geometry, LineString, LinearRing, Point, Polygon
 import geopandas as gpd
+from geopandas.tools._random import uniform
 import shapely
 import networkx as nx
 
+from flatten.elevation import interpolate, throttle_requests
 from flatten.optimize import optimize_all_segments
 from flatten.orient_triangle_graph import get_oriented_graph
-from flatten.triangle_graph import get_graph, remove_interstitial_nodes, reverse
+from flatten.triangle_graph import get_triangles_and_segments, remove_interstitial_nodes, reverse
 from flatten.wfs import get_hydro_data
 
 import logging
@@ -125,22 +128,17 @@ def merge_profile_points(
 
     return [build(key, list(g)) for key, g in groupby(points, key=lambda l: l[0])]
 
-
-def main(
-    srs: str,
-    in_box: tuple[float, float, float, float],
+def build_triangles_and_points(
+    union: Geometry,
+    segments: gpd.GeoDataFrame,
     max_segment_length: float,
-    output_file: str | None,
+    get_elevation: Callable[[list[float]],float],
+    output_file: str | None = None,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame] | None:
     logger.info(f"{datetime.now()} - start")
-    box = (in_box[0], in_box[1], in_box[2], in_box[3], srs)
-    (surfaces, segments, _) = get_hydro_data(box, srs)
-    if (surfaces is None) or (segments is None):
-        logger.error("no surface data or no segment data")
-        return None
-    # triangles = get_triangles(surfaces, max_segment_length)
-    gdf_triangle, gdf_triangle_segment, gdf_split = get_graph(
-        surfaces, max_segment_length
+    crs = segments.crs
+    gdf_triangle, gdf_triangle_segment, gdf_split = get_triangles_and_segments(
+        union, get_elevation, crs, max_segment_length
     )
     logger.info(f"{len(gdf_triangle)} triangles, {len(gdf_triangle_segment)} triangle segments")
     graph, edge_gdf, has_no_cycle = get_oriented_graph(gdf_triangle, segments)
@@ -281,7 +279,7 @@ def main(
             "point_bottlenecks": point_bottlenecks,
         },
         geometry=point_geom,
-        crs=surfaces.crs,
+        crs=crs,
     )
     if output_file is not None:
         gdf_points.to_file(output_file, layer="points", driver="GPKG")
@@ -306,11 +304,10 @@ def main(
             "right_profiles": edge_right_profiles,
         },
         geometry=edge_geometries,
-        crs=surfaces.crs,
+        crs=crs,
     )
     if output_file is not None:
         gdf_edges_final.to_file(output_file, layer="edges_final", driver="GPKG")
-        surfaces.to_file(output_file, layer="surface")
         segments.to_file(output_file, layer="hydro_segment")
         gdf_triangle.to_file(output_file, layer="triangle", driver="GPKG")
         gdf_split.to_file(output_file, layer="triangle_split", driver="GPKG")
@@ -320,6 +317,60 @@ def main(
     logger.info(f"{datetime.now()} - all done!")
     return gdf_points, gdf_split
 
+
+def process_all(
+    surfaces: gpd.GeoDataFrame,
+    segments: gpd.GeoDataFrame,
+    max_segment_length: float,
+    get_elevation: Callable[[list[float]],float]|None = None,
+    output_file: str | None = None,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame] | None:
+        # union = shapely.union_all(surfaces.geometry).simplify(0.1, preserve_topology=True)
+    union = shapely.union_all(surfaces.geometry).segmentize(max_segment_length)
+    if get_elevation is None:
+        # not elevation function given, we create one using the IGN API
+        # sample points
+        number_of_points = int(
+            union.area / 10000
+        )  # computed according to the surface of union (1 point per hectare)
+        sample_multipoint: shapely.MultiPoint = uniform(union, number_of_points, 42) # type: ignore
+        sample_points = [(p.x, p.y) for p in sample_multipoint.geoms]
+        transformer = Transformer.from_crs(surfaces.crs, 4326)
+        elevations = throttle_requests(list(transformer.itransform(sample_points)))
+        assert len(elevations) == len(sample_points)
+        get_elevation = interpolate(sample_points, elevations)
+
+    res = build_triangles_and_points(union, segments, max_segment_length, get_elevation, output_file)
+    if res is None:
+        return None
+    points, triangles = res
+    logger.info(f"{datetime.now()} - optimize_all_segments ({len(points)} points, {len(triangles)} triangles)")
+    points = optimize_all_segments(points)
+    if points is None:
+        return None
+    logger.info(f"{datetime.now()} - optimize triangles ({len(triangles)})")
+    final_triangles_gdf = optimize_triangles(points, triangles)
+    logger.info(f"{datetime.now()} - optimized triangles ({len(final_triangles_gdf)})")
+    if output_file:
+        surfaces.to_file(output_file, layer="surface")
+        points.to_file(output_file, layer="points_optimised")
+        final_triangles_gdf.to_file(output_file, layer="triangles_optimised")
+    logger.info(f"{datetime.now()} - All done!")
+    return points, final_triangles_gdf
+
+def main(
+    srs: str,
+    in_box: tuple[float, float, float, float],
+    max_segment_length: float,
+    output_file: str | None,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame] | None:
+    logger.info(f"{datetime.now()} - start")
+    box = (in_box[0], in_box[1], in_box[2], in_box[3], srs)
+    (surfaces, segments, _) = get_hydro_data(box, srs)
+    if (surfaces is None) or (segments is None):
+        logger.error("no surface data or no segment data")
+        return None
+    return process_all(surfaces, segments, max_segment_length, None, output_file)
 
 def optimal_triangle_height(p1: Point, p2: Point, p3: Point) -> Point:
     """
@@ -394,14 +445,3 @@ if __name__ == "__main__":
     output_file = "triangle_graph.gpkg"
     max_segment_length = 20.0
     res = main(srs, box, max_segment_length, output_file)
-    if res is not None:
-        points, triangles = res
-        logger.info(f"{datetime.now()} - optimize_all_segments ({len(points)} points, {len(triangles)} triangles)")
-        points = optimize_all_segments(points)
-        if points is not None:
-            points.to_file(output_file, layer="points_optimised")
-            logger.info(f"{datetime.now()} - optimize triangles ({len(triangles)})")
-            final_triangles_gdf = optimize_triangles(points, triangles)
-            logger.info(f"{datetime.now()} - optimized triangles ({len(final_triangles_gdf)})")
-            final_triangles_gdf.to_file(output_file, layer="triangles_optimised")
-            logger.info(f"{datetime.now()} - All done!")
