@@ -111,11 +111,11 @@ def get_triangles_and_segments(
     unified = unified.set_crs(gdf_triangle_segment.crs, allow_override=True)  # type: ignore
     return gdf_triangle, unified, gdf_split  # type: ignore #, oriented_triangle_graph#gdf_edges
 
-def get_triangle_graph_as_nx(gdf_triangle: gpd.GeoDataFrame) -> nx.Graph:
+def get_triangle_graph_as_nx(gdf_triangle: gpd.GeoDataFrame, id_column: str = "triangle_id") -> nx.Graph:
     touching_triangles = gdf_triangle.sjoin(gdf_triangle, predicate="touches")
     graph = nx.Graph()
     for triangle_id_left, triangle_id_right in zip(
-        touching_triangles["triangle_id_left"], touching_triangles["triangle_id_right"]
+        touching_triangles[f"{id_column}_left"], touching_triangles[f"{id_column}_right"]
     ):
         if triangle_id_left < triangle_id_right:
             geom_left: shapely.Polygon = gdf_triangle.at[triangle_id_left, "geometry"]  # type: ignore

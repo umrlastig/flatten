@@ -8,155 +8,13 @@ from shapely import Point
 from tqdm import tqdm
 import math
 import logging
+import networkx as nx
+
+from flatten.triangle_graph import get_triangle_graph_as_nx
 
 logger = logging.getLogger(__name__)
-
-# def optimize_segment(
-#     segment_left: gpd.GeoDataFrame,
-#     segment_right: gpd.GeoDataFrame,
-#     fixed_heights: dict[Point, float | None],
-#     alpha: float = 1.0,
-#     beta: float = 10.0,
-#     gamma: float = 0.1,
-#     bottlenecks_as_string: bool = False
-# ):
-#     """
-#     Optimize a segment with segment_order.
-
-#     :param alpha: weight of the fidelity to the original heights
-#     :type alpha: float
-#     :param beta: weight of the pairwise consistency
-#     :type beta: float
-#     :param gamma: weight of the smoothness (gamma > 0 activates smoothness)
-#     :type gamma: float
-#     :param bottlenecks_as_string: true if reading from file (bottleneck info is converted to string), false otherwise
-#     """
-#     tol = 1e-9
-
-#     # find the bottleneck pairs
-#     def values_from_string(s: str):
-#         return [int(x.strip()) for x in (s[1:-1].split(",")) if len(x.strip()) > 0]
-
-#     bottlenecks_left = list(
-#         map(values_from_string, segment_left["point_bottlenecks"].tolist())
-#     ) if bottlenecks_as_string else segment_left["point_bottlenecks"].tolist()
-#     bottlenecks_right = list(
-#         map(values_from_string, segment_right["point_bottlenecks"].tolist())
-#     ) if bottlenecks_as_string else segment_right["point_bottlenecks"].tolist()
-#     bottlenecks = np.array(list(chain.from_iterable(bottlenecks_left)))
-#     pairs = []
-#     if len(bottlenecks) > 0:
-#         # the last index of the bottleneck pairs
-#         max_bottleneck_order = max(bottlenecks)
-#         # zero‑based indices of linked points
-#         for b in range(0, max_bottleneck_order + 1):
-#             for i, b_l in enumerate(bottlenecks_left):
-#                 if b in b_l:
-#                     left = i
-#             for i, r_l in enumerate(bottlenecks_right):
-#                 if b in r_l:
-#                     right = i
-#             pairs.append((left, right))
-
-#     zL0 = segment_left["geometry"].z  # original left heights, length n
-#     zR0 = segment_right["geometry"].z  # original right heights, length m
-#     # Fixed‑height specifications (list of (index, height))
-#     fixed_left = []
-#     fixed_right = []
-#     for key, value in fixed_heights.items():
-#         if value is not None:
-#             # print("Fixed height", key, value)
-#             matches = segment_left[
-#                 (np.abs(segment_left["geometry"].x - key.x) < tol)
-#                 & (np.abs(segment_left["geometry"].y - key.y) < tol)
-#             ]
-#             if len(matches) > 0:
-#                 for i in matches["point_order"]:
-#                     # print("Found left", i)
-#                     fixed_left.append((i, value))
-#             matches = segment_right[
-#                 (np.abs(segment_right["geometry"].x - key.x) < tol)
-#                 & (np.abs(segment_right["geometry"].y - key.y) < tol)
-#             ]
-#             if len(matches) > 0:
-#                 for i in matches["point_order"]:
-#                     # print("Found right", i)
-#                     fixed_right.append((i, value))
-#     n = len(zL0)
-#     m = len(zR0)
-#     # variables
-#     zL = cp.Variable(n)
-#     zR = cp.Variable(m)
-#     # objectives
-#     obj = 0
-#     obj += alpha * cp.sum_squares(
-#         zL - zL0
-#     )  # fidelity to the original heights, left profile
-#     obj += alpha * cp.sum_squares(
-#         zR - zR0
-#     )  # fidelity to the original heights, right profile
-#     obj += beta * cp.sum(
-#         [cp.square(zL[i] - zR[j]) for i, j in pairs]
-#     )  # pairwise consistency (bottlenecks)
-#     if gamma > 0:
-#         # second‑difference smoothness
-#         obj += gamma * cp.sum_squares(zL[2:] - 2 * zL[1:-1] + zL[:-2])
-#         obj += gamma * cp.sum_squares(zR[2:] - 2 * zR[1:-1] + zR[:-2])
-#     # monotonicity constraints
-#     constraints = []
-#     constraints += [zL[i + 1] >= zL[i] for i in range(n - 1)]
-#     constraints += [zR[j + 1] >= zR[j] for j in range(m - 1)]
-#     # fixed‑height equalities
-#     for idx, height in fixed_left:
-#         constraints.append(zL[idx] == height)
-#     for idx, height in fixed_right:
-#         constraints.append(zR[idx] == height)
-#     # solve
-#     prob = cp.Problem(cp.Minimize(obj), constraints)
-#     res = prob.solve(solver=cp.OSQP, max_iter=100_000)
-
-#     # results
-#     zL_opt = zL.value
-#     zR_opt = zR.value
-
-#     if isinstance(res, float) and (math.isinf(res)):
-#         logger.error(f"res = {res}")
-#         logger.error(f"segment_order = {segment_left["segment_order"].tolist()[0]}")
-#         logger.error(f"left = {segment_left["geometry"].tolist()}")
-#         logger.error(f"right = {segment_right["geometry"].tolist()}")
-#         logger.error(f"fixed_left = {fixed_left}")
-#         logger.error(f"fixed_right = {fixed_right}")
-#         logger.error(f"zL0 = {zL0.tolist()}")
-#         logger.error(f"zR0 = {zR0.tolist()}")
-#         logger.debug(f"zL_opt = {zL_opt}")
-#         logger.debug(f"zR_opt = {zR_opt}")
-#     if (zL_opt is None) or (zR_opt is None):
-#         return None, None
-
-#     # logger.debug(f"outshape = {np.shape(zL_opt)[0]}, {np.shape(zR_opt)[0]}") # type: ignore
-#     # add new fixed height
-#     for key, value in fixed_heights.items():
-#         if value is None:
-#             matches = segment_left[
-#                 (np.abs(segment_left["geometry"].x - key.x) < tol)
-#                 & (np.abs(segment_left["geometry"].y - key.y) < tol)
-#             ]
-#             if len(matches) > 0:
-#                 for i in matches["point_order"]:
-#                     fixed_heights[key] = zL_opt[i]  # type: ignore
-#             matches = segment_right[
-#                 (np.abs(segment_right["geometry"].x - key.x) < tol)
-#                 & (np.abs(segment_right["geometry"].y - key.y) < tol)
-#             ]
-#             if len(matches) > 0:
-#                 for i in matches["point_order"]:
-#                     # print(key, "Found right", i, zR_opt[i]) # type: ignore
-#                     fixed_heights[key] = zR_opt[i]  # type: ignore
-#     return zL_opt, zR_opt
-
-# def sliding_window_generator(lst, n=3):
-#     for i in range(len(lst) - n + 1):
-#         yield lst[i:i+n]
+logger.setLevel("DEBUG")
+logger.addHandler(logging.StreamHandler())
 
 def build_pairwise_difference_matrix(n, pairs):
     """
@@ -173,8 +31,7 @@ def build_pairwise_difference_matrix(n, pairs):
         cols.extend([i, j])
         data.extend([1.0, -1.0])
     
-    D = sp.coo_matrix((data, (rows, cols)), shape=(num_pairs, n)).tocsr()
-    return D
+    return sp.coo_matrix((data, (rows, cols)), shape=(num_pairs, n)).tocsr()
 
 def build_second_difference_matrix(n, consecutive_points):
     """
@@ -198,15 +55,53 @@ def build_second_difference_matrix(n, consecutive_points):
             cols.extend([i, j, k])
             data.extend([1.0, -2.0, 1.0])
 
-    num_triplets = len(rows) // 3
-    return sp.coo_matrix((data, (rows, cols)), shape=(num_triplets, n)).tocsr()
+    return sp.coo_matrix((data, (rows, cols)), shape=(len(rows)//3, n)).tocsr()
 
+def build_normal_alignment_matrix(n, triangles):
+    """
+    Build matrix where each row represents a triangle's normal constraint.
+    We use a simplified version using the second difference between points.
+    """
+    rows = []
+    cols = []
+    data = []
+    
+    for tri_idx, (i, j, k) in enumerate(triangles):
+        # Simplified: penalize deviation from planar surface
+        rows.extend([tri_idx, tri_idx, tri_idx])
+        cols.extend([i, j, k])
+        data.extend([1.0, -2.0, 1.0])  # Second difference approximation
+    
+    return sp.coo_matrix((data, (rows, cols)), shape=(len(rows)//3, n)).tocsr()
+
+def build_normal_consistency_matrix(n, triangles, adjacency):
+    """
+    Penalize differences between normals of adjacent triangles.
+    """
+    num_edges = len(adjacency)
+    rows = []
+    cols = []
+    data = []
+    
+    for edge_idx, (tri1, tri2) in enumerate(adjacency):
+        # Add terms that encourage similar z gradients
+        # This approximates normal similarity
+        for idx in range(3):
+            rows.extend([edge_idx, edge_idx])
+            cols.extend([triangles[tri1][idx], triangles[tri2][idx]])
+            data.extend([1.0, -1.0])
+    # for r, c, d in zip(rows, cols, data):
+    #     logger.debug(f"{r} {c} {d}")
+    return sp.coo_matrix((data, (rows, cols)), shape=(num_edges, n)).tocsr()
 
 def optimize_all_segments(
     points: gpd.GeoDataFrame,
+    triangles: gpd.GeoDataFrame,
     alpha: float = 1.0,
-    beta: float = 10.0,
-    gamma: float = 0.1,
+    beta: float = 1.0,
+    gamma: float = 0.0,
+    delta: float = 0.0,
+    epsilon: float = 10.0
 ) -> gpd.GeoDataFrame | None:
     """
     Optimize all segments with segment_order.
@@ -218,6 +113,7 @@ def optimize_all_segments(
     :param gamma: weight of the smoothness (gamma > 0 activates smoothness)
     :type gamma: float
     """
+    logger.info(f"{datetime.now()} - optimize_all_segments - building data structure")
     points["unique_id"] = points.groupby("geometry", sort=False).ngroup()
     unique_points = points.drop_duplicates(subset=["geometry"], keep="first")
     assert list(unique_points["unique_id"]) == list(range(0, len(unique_points)))
@@ -249,7 +145,45 @@ def optimize_all_segments(
                 if b in r_l:
                     right = segment_right.iloc[i]["unique_id"]
             pairs.append((left, right))
-
+    logger.info(f"{datetime.now()} - optimize_all_segments - triangles")
+    triangles = triangles.reset_index(drop=True)
+    triangles['split_triangle_id'] = triangles.index
+    triangles_idx = []
+    triangle_map = {}
+    tol = 1e-9
+    for idx, triangle_geom in enumerate(triangles.geometry):
+        coords = triangle_geom.exterior.coords # type: ignore
+        triangle_indices = []
+        for coord in coords[:-1]:
+            mask = (np.abs(unique_points.geometry.x - coord[0]) < tol) & (
+                np.abs(unique_points.geometry.y - coord[1]) < tol
+            )
+            matches = unique_points[mask]
+            if any(matches):
+                # logger.info(f"matches = {matches}")
+                if len(matches) > 0:
+                    # logger.info(f'matches["unique_id"] = {matches["unique_id"]}')
+                    # logger.info(f'matches.index[0] = {matches.index[0]}')
+                    # logger.info(f'matches.at[0,"unique_id"] = {matches.at[0,"unique_id"]}')
+                    triangle_indices.append(
+                        # matches.index[0]
+                        matches["unique_id"].tolist()[0]
+                    )
+        if len(triangle_indices) == 3:
+            triangle_map[idx] = len(triangles_idx)
+            triangles_idx.append(triangle_indices)
+            # logger.info(f"Triangle {idx} => {len(triangles_idx)}: {triangle_indices}")
+        # else:
+        #     logger.error(f"{len(triangle_indices)} indices found for {triangle_geom}")
+    logger.info(f"{datetime.now()} - triangles_idx {len(triangles_idx)}")
+    logger.info(f"{datetime.now()} - optimize_all_segments - adjacency")
+    graph = get_triangle_graph_as_nx(triangles,'split_triangle_id')
+    # for u, v in graph.edges:
+    #     tri1 = triangles.iloc[u]
+    #     tri2 = triangles.iloc[v]
+    #     logger.debug(f"{u} {v} {tri1["geometry"]} {tri2["geometry"]}")
+    adjacency = [(triangle_map[u],triangle_map[v]) for u, v in graph.edges if (u in triangle_map) and (v in triangle_map)]
+    logger.info(f"{datetime.now()} - optimize_all_segments - creating problem")
     # original heights
     z0 = np.array(unique_points["geometry"].z)
     n = len(z0)
@@ -260,16 +194,26 @@ def optimize_all_segments(
     # fidelity to the original heights
     obj += alpha * cp.sum_squares(z - z0)
     if beta > 0:
-        # pairwise consistency (bottlenecks)
-        # obj += beta * cp.sum([cp.square(z[i] - z[j]) for i, j in pairs])
         # Build difference matrix for pairwise consistency (bottlenecks)
         D_pairs = build_pairwise_difference_matrix(n, pairs)
-        # Vectorized pairwise term
         obj += beta * cp.sum_squares(D_pairs @ z)
     if gamma > 0:
         # second‑difference smoothness
-        D = build_second_difference_matrix(n, consecutive_points)
-        obj += gamma * cp.sum_squares(D @ z)
+        D_smoothness = build_second_difference_matrix(n, consecutive_points)
+        obj += gamma * cp.sum_squares(D_smoothness @ z)
+
+    if delta > 0:
+        # penalize non flat triangles
+        N_matrix = build_normal_alignment_matrix(n, triangles_idx)
+        if (N_matrix.shape is not None) and (N_matrix.shape[0] > 0):
+            obj += delta * cp.sum_squares(N_matrix @ z)
+
+    if epsilon > 0:
+        # ajacent triangles
+        D_normal = build_normal_consistency_matrix(n, triangles_idx, adjacency)
+        if (D_normal.shape is not None) and (D_normal.shape[0] > 0):
+            obj += epsilon * cp.sum_squares(D_normal @ z)
+
     # monotonicity constraints
     constraints = []
     for consecutive in consecutive_points:
@@ -281,6 +225,7 @@ def optimize_all_segments(
     prob = cp.Problem(cp.Minimize(obj), constraints)
     # Try OSQP first (fast for QP), fallback to ECOS if needed
     try:
+        logger.info(f"{datetime.now()} - optimize_all_segments - solve")
         res = prob.solve(solver=cp.OSQP, max_iter=100_000, eps_abs=1e-6, eps_rel=1e-6)
     except Exception as e:
         logger.error(f"OSQP failed: {e}. Trying ECOS...")
@@ -288,8 +233,8 @@ def optimize_all_segments(
 
     # Check Status
     if prob.status in ["optimal", "optimal_inaccurate"]:
-        logger.info(f"Optimization successful. Status: {prob.status}")
-        logger.info(f"Objective value: {prob.value:.4f}")
+        logger.info(f"{datetime.now()} - Optimization successful. Status: {prob.status}")
+        logger.info(f"{datetime.now()} - Objective value: {prob.value:.4f}")
         # results
         z_opt = z.value
         points["old_z"] = points["unique_id"].map(lambda x: z0.tolist()[x])
@@ -300,14 +245,15 @@ def optimize_all_segments(
 
         # Reconstruct geometries
         points["geometry"] = [Point(x, y, z) for x, y, z in zip(xs, ys, zs_new)]  # type: ignore
-        verify_pairwise_consistency(z_opt, pairs, beta)
+        verify_pairwise_consistency(z_opt, pairs)
         verify_smoothness(z_opt, consecutive_points)
+        # TODO verify all terms?
         return points
 
     else:
-        logger.error(f"Optimization failed. Status: {prob.status}")
-        logger.error(f"Reason: {prob.status}")
-        logger.error(f"res = {res}")
+        logger.error(f"{datetime.now()} - Optimization failed. Status: {prob.status}")
+        logger.error(f"{datetime.now()} - Reason: {prob.status}")
+        logger.error(f"{datetime.now()} - res = {res}")
         return None
 
 def verify_smoothness(z_vals, consecutive_points):
@@ -326,9 +272,9 @@ def verify_smoothness(z_vals, consecutive_points):
     matrix_sum = np.sum((D @ z_vals) ** 2)
 
     assert abs(loop_sum - matrix_sum) < 1e-6, "Formulations don't match!"
-    logger.info(f"Smoothness terms match: {loop_sum:.6f}")
+    logger.info(f"{datetime.now()} - Smoothness terms match: {loop_sum:.6f}")
 
-def verify_pairwise_consistency(z_vals, pairs, beta):
+def verify_pairwise_consistency(z_vals, pairs):
     """Verify that the vectorized and loop versions give same result."""
     # Loop version
     loop_sum = sum((z_vals[i] - z_vals[j])**2 for i, j in pairs)
@@ -338,96 +284,5 @@ def verify_pairwise_consistency(z_vals, pairs, beta):
     vec_sum = np.sum((D @ z_vals)**2)
     
     assert abs(loop_sum - vec_sum) < 1e-6, "Results don't match!"
-    logger.info(f"Pairwise terms match: {loop_sum:.6f}")
+    logger.info(f"{datetime.now()} - Pairwise terms match: {loop_sum:.6f}")
 
-# def modify_heights(
-#     points: gpd.GeoDataFrame, segments: gpd.GeoDataFrame, heights: list[float]
-# ):
-#     for p, z in zip(segments["geometry"], heights):
-#         tol = 1e-9
-#         mask = (np.abs(points["geometry"].x - p.x) < tol) & (
-#             np.abs(points["geometry"].y - p.y) < tol
-#         )
-#         points.loc[mask, "geometry"] = Point(p.x, p.y, z)  # type: ignore
-
-# def optimize(points: gpd.GeoDataFrame, bottlenecks_as_string: bool = False):
-#     segment_orders = sorted(points["segment_order"].unique().tolist())
-
-#     counts = points.groupby("geometry")[["segment_order"]].count()
-#     shared_points = counts[counts["segment_order"] > 1]
-#     fixed_heights = dict[Point, float | None]()
-#     for p in shared_points.index.tolist():
-#         fixed_heights[p] = None
-
-#     temp = dict()
-#     for segment_order in tqdm(segment_orders):
-#         # get left and right points
-#         segment_left = points[
-#             (points["segment_order"] == segment_order)
-#             & (points["point_position"] == "left")
-#         ].sort_values(by=["point_order"])
-#         segment_right = points[
-#             (points["segment_order"] == segment_order)
-#             & (points["point_position"] == "right")
-#         ].sort_values(by=["point_order"])
-#         # logger.debug(f"segment {segment_order}")
-#         zL_opt, zR_opt = optimize_segment(
-#             segment_left, segment_right, fixed_heights, beta=100.0, bottlenecks_as_string = bottlenecks_as_string
-#         )
-#         if zL_opt is not None:
-#             modify_heights(points, segment_left, zL_opt.tolist())
-#         if zR_opt is not None:
-#             modify_heights(points, segment_right, zR_opt.tolist())
-#         opt_left = points[
-#             (points["segment_order"] == segment_order)
-#             & (points["point_position"] == "left")
-#         ].sort_values(by=["point_order"])
-#         opt_right = points[
-#             (points["segment_order"] == segment_order)
-#             & (points["point_position"] == "right")
-#         ].sort_values(by=["point_order"])
-#         temp[segment_order] = (
-#             segment_left["geometry"].z,
-#             segment_right["geometry"].z,
-#             opt_left["geometry"].z,
-#             opt_right["geometry"].z,
-#         )
-#     return points, temp
-
-# def main():
-#     logger.info(f"{datetime.now()} Start")
-#     # data
-#     points = gpd.read_file("triangle_graph.gpkg", layer="points")
-
-#     points, temp = optimize(points, True)
-
-#     points.to_file("triangle_graph.gpkg", layer="points_optimised")
-
-#     print(f"{datetime.now()} All done!")
-
-#     def show_plot(show: int):
-#         zL0, zR0, zL_opt, zR_opt = temp[show]
-#         n = len(zL0)
-#         m = len(zR0)
-#         import matplotlib.pyplot as plt
-
-#         fig, (ax0, ax1) = plt.subplots(ncols=2, figsize=(12, 6), sharey=True)
-#         ax0.plot(np.arange(n), np.array(zL0), "C0.-", markersize=12)
-#         ax0.plot(np.arange(n), zL_opt, "C1.-", markersize=12)
-#         ax0.legend((f"Left profile for {show}"), loc="lower right")
-#         ax0.set_title("Left")
-
-#         ax1.plot(np.arange(m), np.array(zR0), "C0.-", markersize=12)
-#         ax1.plot(np.arange(m), zR_opt, "C1.-", markersize=12)
-#         ax1.legend((f"Right profile for {show}"), loc="lower right")
-#         ax1.set_title("Right")
-
-#         plt.show()
-
-#     # show_plot(25)
-#     # show_plot(16)
-
-# if __name__ == "__main__":
-#     logger.setLevel("DEBUG")
-#     logger.addHandler(logging.StreamHandler())
-#     main()

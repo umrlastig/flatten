@@ -141,16 +141,16 @@ def build_triangles_and_points(
         union, get_elevation, crs, max_segment_length
     )
     logger.info(f"{len(gdf_triangle)} triangles, {len(gdf_triangle_segment)} triangle segments")
-    graph, edge_gdf, has_no_cycle = get_oriented_graph(gdf_triangle, segments)
+    simple_graph, edge_gdf, has_no_cycle = get_oriented_graph(gdf_triangle, segments)
 
-    for cycle in list(nx.simple_cycles(graph)):
+    for cycle in list(nx.simple_cycles(simple_graph)):
         logger.debug(f"Cycle: {cycle}")
     if output_file is not None:
         edge_gdf.to_file(output_file, layer="edges")
     assert has_no_cycle  # make sure there is no cycle
 
     # simplify graph by removing simple nodes (1 incoming edge, 1 outgoing edge)
-    graph = remove_interstitial_nodes(graph)
+    graph = remove_interstitial_nodes(simple_graph)
     line_graph = nx.line_graph(graph)
     sorted_edges = list(
         nx.lexicographical_topological_sort(
@@ -281,9 +281,6 @@ def build_triangles_and_points(
         geometry=point_geom,
         crs=crs,
     )
-    if output_file is not None:
-        gdf_points.to_file(output_file, layer="points", driver="GPKG")
-
     edge_ids = []
     edge_geometries = []
     edge_left_profiles = []
@@ -296,17 +293,19 @@ def build_triangles_and_points(
         edge_left_profiles.append(len(left))
         edge_right_profiles.append(len(right))
 
-    gdf_edges_final = gpd.GeoDataFrame(
-        {
-            "edge_id": list(range(0, len(sorted_edges))),
-            "edge_ids": edge_ids,
-            "left_profiles": edge_left_profiles,
-            "right_profiles": edge_right_profiles,
-        },
-        geometry=edge_geometries,
-        crs=crs,
-    )
     if output_file is not None:
+        gdf_points.to_file(output_file, layer="points", driver="GPKG")
+        # we only need to build the gdf if we export it
+        gdf_edges_final = gpd.GeoDataFrame(
+            {
+                "edge_id": list(range(0, len(sorted_edges))),
+                "edge_ids": edge_ids,
+                "left_profiles": edge_left_profiles,
+                "right_profiles": edge_right_profiles,
+            },
+            geometry=edge_geometries,
+            crs=crs,
+        )
         gdf_edges_final.to_file(output_file, layer="edges_final", driver="GPKG")
         segments.to_file(output_file, layer="hydro_segment")
         gdf_triangle.to_file(output_file, layer="triangle", driver="GPKG")
@@ -322,6 +321,11 @@ def process_all(
     surfaces: gpd.GeoDataFrame,
     segments: gpd.GeoDataFrame,
     max_segment_length: float,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    delta: float,
+    epsilon: float,
     get_elevation: Callable[[list[float]],float]|None = None,
     output_file: str | None = None,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame] | None:
@@ -342,11 +346,13 @@ def process_all(
 
     res = build_triangles_and_points(union, segments, max_segment_length, get_elevation, output_file)
     if res is None:
+        logger.error("build_triangles_and_points Failed")
         return None
     points, triangles = res
     logger.info(f"{datetime.now()} - optimize_all_segments ({len(points)} points, {len(triangles)} triangles)")
-    points = optimize_all_segments(points)
+    points = optimize_all_segments(points, triangles, alpha=alpha, beta=beta, gamma=gamma, delta=delta, epsilon=epsilon)
     if points is None:
+        logger.error("optimize_all_segments Failed")
         return None
     logger.info(f"{datetime.now()} - optimize triangles ({len(triangles)})")
     final_triangles_gdf = optimize_triangles(points, triangles)
@@ -362,7 +368,12 @@ def main(
     srs: str,
     in_box: tuple[float, float, float, float],
     max_segment_length: float,
-    output_file: str | None,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    delta: float,
+    epsilon: float,
+    output_file: str | None = None,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame] | None:
     logger.info(f"{datetime.now()} - start")
     box = (in_box[0], in_box[1], in_box[2], in_box[3], srs)
@@ -370,7 +381,7 @@ def main(
     if (surfaces is None) or (segments is None):
         logger.error("no surface data or no segment data")
         return None
-    return process_all(surfaces, segments, max_segment_length, None, output_file)
+    return process_all(surfaces, segments, max_segment_length, alpha, beta, gamma, delta, epsilon, None, output_file)
 
 def optimal_triangle_height(p1: Point, p2: Point, p3: Point) -> Point:
     """
@@ -441,7 +452,14 @@ if __name__ == "__main__":
     logger.setLevel("DEBUG")
     logger.addHandler(logging.StreamHandler())
     srs = "urn:ogc:def:crs:EPSG::2154"
-    box = (1030000, 6280000, 1040000, 6310000)
-    output_file = "triangle_graph.gpkg"
+    # box = (1030000, 6280000, 1040000, 6291100)
+    box = (1036535, 6289927, 1042268, 6305786)
+    # box = (1030000, 6280000, 1040000, 6310000)
+    alpha = 1.0
+    beta = 1.0
+    gamma = 1.0
+    delta = 0.0
+    epsilon = 10.0
+    output_file = f"triangle_graph_{alpha}_{beta}_{gamma}_{delta}_{epsilon}.gpkg"
     max_segment_length = 20.0
-    res = main(srs, box, max_segment_length, output_file)
+    res = main(srs, box, max_segment_length, alpha, beta, gamma, delta, epsilon, output_file)
