@@ -7,10 +7,24 @@ from pyproj import CRS
 import shapely
 from shapely import Geometry, LineString, Polygon
 import networkx as nx
+from itertools import chain
 
-from flatten.split import get_segments
 from flatten.utils import get_bottlenecks, split_triangles_with_bottlenecks
 
+def get_segments(triangles: gpd.GeoSeries):
+    rings = [shapely.get_exterior_ring(triangle) for triangle in triangles]
+    rings = [ring for ring in rings if ring is not None]
+    list_of_lists = [
+        [
+            LineString(sorted([ring.coords[i], ring.coords[i + 1]]))
+            for i in range(0, len(ring.coords) - 1)
+        ]
+        for ring in rings
+    ]
+    return list(chain(*list_of_lists))
+
+def get_triangle(p: Polygon, get_elevation: Callable[[list[float]],float]) -> Polygon:
+    return Polygon([(c[0], c[1], get_elevation([c[0], c[1]])) for c in p.exterior.coords])
 
 def get_triangles_with_height(
     union: Geometry, crs: CRS|None, get_elevation: Callable[[list[float]],float]
@@ -24,7 +38,7 @@ def get_triangles_with_height(
         return z_values.mean()
 
     # use crs from input file
-    triangle_list = [p for p in triangles.geoms]
+    triangle_list = [get_triangle(p, get_elevation) for p in triangles.geoms] # type: ignore
     triangle_heights = [triangle_height(p) for p in triangles.geoms]  # type: ignore
     triangle_centroids = [[p.centroid.x, p.centroid.y] for p in triangles.geoms]
     triangle_elevations = [get_elevation(c) for c in triangle_centroids]

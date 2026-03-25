@@ -10,23 +10,11 @@ from shapely.geometry import shape
 from itertools import chain, groupby
 from functools import reduce
 
+from flatten.triangle_graph import get_segments
+
 app = typer.Typer(
     name="pymatch", help="Pymatch matches geographical features", add_completion=True
 )
-
-
-def get_segments(triangles: gpd.GeoSeries):
-    rings = [shapely.get_exterior_ring(triangle) for triangle in triangles]
-    rings = [ring for ring in rings if ring is not None]
-    list_of_lists = [
-        [
-            LineString(sorted([ring.coords[i], ring.coords[i + 1]]))
-            for i in range(0, len(ring.coords) - 1)
-        ]
-        for ring in rings
-    ]
-    return list(chain(*list_of_lists))
-
 
 @app.command()
 def main(
